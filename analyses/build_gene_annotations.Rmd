@@ -1,0 +1,50 @@
+---
+title: "Creating of diverse annotation files"
+author: "Christian Holland"
+date: "31/01/2019"
+output: html_document
+---
+
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(biomaRt)
+library(tidyverse)
+```
+
+```{r "protocol biomart and ensembl version"}
+# used package version
+packageVersion("biomaRt") # 2.36.1
+# current ensembl release
+listEnsemblArchives() # 95, http://jan2019.archive.ensembl.org
+```
+
+```{r "create annotaion files"}
+mouse_ensembl = useMart("ensembl",dataset="mmusculus_gene_ensembl", 
+                        host = "http://jan2019.archive.ensembl.org")
+human_ensembl = useMart("ensembl", dataset = "hsapiens_gene_ensembl", 
+                        host = "http://jan2019.archive.ensembl.org")
+
+# enseml - hgnc - entrez
+getBM(attributes = c("hgnc_symbol", "ensembl_gene_id", 
+                         "ensembl_gene_id_version", "entrezgene"),
+      mart = human_ensembl) %>%
+  as_tibble() %>%
+  na_if("") %>%
+  write_csv("data/annotations/hgnc_ensembl_entrez.csv")
+
+getBM(attributes = c("mgi_symbol", "ensembl_gene_id", 
+                     "ensembl_gene_id_version","entrezgene"),
+      mart = mouse_ensembl) %>%
+  as_tibble() %>%
+  na_if("") %>%
+  write_csv("data/annotations/mgi_ensembl_entrez.csv")
+```
