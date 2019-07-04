@@ -1,0 +1,552 @@
+---
+title: "in_vitro_benchmark"
+author: "Christian Holland"
+date: "6/18/2019"
+output: html_document
+---
+
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(tidyverse)
+library(yardstick)
+library(myutils)
+library(readxl)
+library(Matrix)
+library(cowplot)
+library(rstatix)
+library(ggpubr)
+library(tidylog)
+library(scran)
+library(limma)
+library(biobroom)
+library(ggrepel)
+
+options("tidylog.display" = list(print))
+source("src/my_ggplot_themes.R")
+```
+
+### Benchmark
+#### Process guide matrices
+```{r "process guide matrices}
+# load guide matrices from perturbseq
+pre_gmatrix_perturbseq = list.files("data/in_vitro_benchmark/perturbseq", full.names = T, recursive = T, pattern = "guide_matrix") %>%
+  map_df(function(path) {
+    get(load(path)) %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("cell") %>%
+      as_tibble() %>%
+      gather(guide, logical_value, -cell) %>%
+      mutate(int = as.integer(logical_value)) %>%
+      filter(int > 0) %>%
+      select(-logical_value, -int) %>%
+      mutate(day = parse_number(path),
+             series = "perturbseq")
+  })
+
+tmp_gmatrix_perturbseq = pre_gmatrix_perturbseq %>%
+  pull(guide) %>%
+  str_match(., "(p_sg(.*)_([0-9]*))") %>%
+  as_tibble(.name_repair = "unique") %>% 
+  select(guide = ...1, -...2, target = ...3, rep = ...4) %>%
+  drop_na() %>%
+  mutate(rep = as.integer(rep)) %>%
+  distinct() %>%
+  left_join(pre_gmatrix_perturbseq, by="guide")
+  
+gmatrix_perturbseq = anti_join(pre_gmatrix_perturbseq,tmp_gmatrix_perturbseq, by=c("guide")) %>%
+  filter(str_detect(guide, "INTERGEN")) %>%
+  group_by(guide, day) %>%
+  mutate(target = "intergenic",
+         rep = row_number()) %>%
+  ungroup() %>%
+  bind_rows(tmp_gmatrix_perturbseq) %>%
+  arrange(guide) %>%
+  mutate(group = case_when(target == "intergenic" ~ str_c("control", day, sep="_"),
+                           target != "intergenic" ~ str_c(guide, day, sep = "_"))) %>%
+  dplyr::add_count(cell, day) %>%
+  filter(n==1) %>%
+  select(-n) %>%
+  arrange(cell)
+  
+  
+# load guide matrix from crispri
+gmatrix_crispri = get(load("data/in_vitro_benchmark/crispri/guide_matrix.RData")) %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("cell") %>%
+  as_tibble() %>%
+  gather(guide, logical_value, -cell) %>%
+  mutate(int = as.integer(logical_value)) %>%
+  filter(int > 0) %>%
+  select(-logical_value, -int) %>%
+  mutate(day = NA_real_,
+         series = "crispri") %>%
+  separate(guide, into = c("target", "tmp"), sep = "-", remove = F) %>%
+  mutate(rep = parse_number(tmp),
+         group = case_when(target == "Scramble" ~ "control",
+                           target != "Scramble" ~ guide)) %>%
+  add_count(cell) %>%
+  filter(n==1) %>%
+  arrange(cell) %>%
+  select(-c(n, tmp))
+
+gmatrix = bind_rows(gmatrix_perturbseq, gmatrix_crispri) %>%
+  mutate(group = str_replace(group, "-", "_"),
+         group = as_factor(group)) %>%
+  mutate(class = case_when(day == 13 ~ "perturbseq_13",
+                            day == 7 ~ "perturbseq_7",
+                            TRUE ~ "crispri")) %>%
+  mutate(class = factor(class, 
+                        levels = c("perturbseq_7", "perturbseq_13", "crispri")))
+
+saveRDS(gmatrix, "output/in_vitro_benchmark/meta/guide_matrices.rds")
+```
+
+#### Build design matrices and define contrasts
+```{r "build design matrices and define contrasts}
+# build design matrix
+gmatrix = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") 
+
+design = gmatrix %>%
+  nest(-series, -day) %>%
+  transmute(series, day, design = data %>% map(function(data) {
+    d = data %>%
+      mutate(group = fct_drop(group))
+    design = model.matrix(~0+group, data = d) 
+    rownames(design) = d$cell
+    colnames(design) = levels(d$group)
+    return(design)
+  })) %>%
+  mutate(class = case_when(day == 13 ~ "perturbseq_13",
+                            day == 7 ~ "perturbseq_7",
+                            TRUE ~ "crispri")) %>%
+  mutate(class = factor(class, 
+                        levels = c("perturbseq_7", "perturbseq_13", "crispri"))) %>%
+  select(series, day, class, design)
+
+
+saveRDS(design, "output/in_vitro_benchmark/meta/design_df.rds")
+
+p_design_13 = design %>% dplyr::slice(1) %>% pluck(4,1)
+p_design_7 = design %>% dplyr::slice(2) %>% pluck(4,1)
+c_design = design %>% dplyr::slice(3) %>% pluck(4,1)
+
+# define contrasts
+contrast_df = gmatrix %>%
+  filter(!str_detect(group, "control")) %>%
+  mutate(day = str_replace_na(day)) %>%
+  mutate(contrast_name = str_c(target, rep, day, series, sep = "_")) %>%
+  mutate(contrast_str = case_when(day == "13" ~ str_c(group, "-", "control_13"),
+                                  day == "7" ~ str_c(group, "-", "control_7"),
+                                  day == "NA" ~ str_c(group, "-", "control"))) %>%
+  mutate(contrast = str_c(contrast_name, "=", contrast_str)) %>%
+  distinct(series, day, class, contrast) %>%
+  nest(-series, -day, -class) %>%
+  mutate(prestr = "makeContrasts(",
+         poststr = case_when(day == "13" ~ ",levels=p_design_13)",
+                             day == "7" ~ ",levels=p_design_7)",
+                             day == "NA" ~ ",levels=c_design)")) %>%
+  mutate(commandstr = pmap(., .f = function(data, prestr, poststr, ...) {
+           paste(prestr,
+                 str_flatten(data$contrast, collapse = ","),
+                 poststr,
+                 sep="")
+         })) %>%
+  transmute(series, day,class, contrast = commandstr %>% map(function(commandstr) {
+    eval(parse(text=commandstr))
+  })) 
+
+saveRDS(contrast_df, "output/in_vitro_benchmark/meta/contrasts.rds")
+```
+#### Process count matrices
+```{r "process count matrices}
+gmatrix = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds")
+perturbseq = list.files(
+  "data/in_vitro_benchmark/perturbseq", full.names = T, recursive = T, 
+  pattern = "count_matrix") %>%
+  map(function(path) {
+    # only cells with one guide per cell
+    keep_cells = gmatrix %>% 
+      filter(series == "perturbseq" & day == parse_number(path)) %>%
+      pull(cell)
+    
+    # load file
+    df = get(load(path))
+    colnames(df) = str_split(colnames(df), pattern="_") %>% 
+      map(pluck(2)) %>% 
+      flatten_chr() 
+    mat = df[keep_cells,] %>% 
+      t() %>%
+      Matrix(sparse=T)
+  })
+
+crispri = list.files("data/in_vitro_benchmark/crispri", full.names = T, recursive = T, pattern="count_matrix") %>%
+  map(function(path) {
+    keep_cells = gmatrix %>% 
+      filter(series == "crispri") %>%
+      pull(cell)
+    
+    df = get(load(path))
+    mat = df[keep_cells,] %>% 
+      t() %>%
+      Matrix(sparse=T)
+  }) %>%
+  pluck(1)
+
+
+setup = tribble(
+  ~series, ~day, ~class,
+  "perturbseq", 13, "perturbseq_13",
+  "perturbseq", 7, "perturbseq_7",
+  "crispri", NA, "crispri"
+) %>%
+  mutate(raw_counts = append(perturbseq, crispri),
+         class = factor(class, 
+                        levels = c("perturbseq_7", "perturbseq_13", "crispri")))
+  
+
+saveRDS(setup, "output/in_vitro_benchmark/expr/count_matrices.rds")
+```
+
+#### Explore relationship between library size and number of detected genes
+```{r "explore relationship between library size and number of detected genes"}
+count_matrices = readRDS("output/in_vitro_benchmark/expr/count_matrices.rds")
+raw_counts = count_matrices[1,4] %>% pluck(1,1)
+
+# scatter plot num_cells ~ library size
+rel = count_matrices %>%
+  transmute(class, rel = raw_counts %>% map(function(raw_counts) {
+    libsize = raw_counts %>% 
+      as.matrix() %>%
+      colSums() %>% 
+      enframe("cell", "libsize")
+    non_zero_genes = apply(raw_counts, 2, function(c) {sum(c!=0)}) %>% 
+      enframe("cell", "non_zero_genes")
+    
+    left_join(libsize, non_zero_genes, by="cell")
+  }))
+
+saveRDS(rel, "output/in_vitro_benchmark/expr/libsize_vs_non-zero-genes.rds")
+```
+
+
+#### Normalization
+```{r, "normalization"}
+count_matrices = readRDS("output/in_vitro_benchmark/expr/count_matrices.rds")
+
+norm_expr = count_matrices %>%
+  transmute(series, day, class, norm_expr = pmap(., function(raw_counts, class,...) {
+    message(class)
+    SingleCellExperiment(list(counts=raw_counts)) %>%
+      computeSumFactors() %>% # computes size factor of 0 when library size is very low (e.g. 7)
+      normalize() %>%
+      exprs()
+  }))
+     
+saveRDS(norm_expr, "output/in_vitro_benchmark/expr/norm_expr.rds")   
+```
+
+#### Differential gene expression analysis
+```{r "differential gene expression analysis}
+expr = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(expr, c, d), .f = left_join, by=c("series", "day", "class"))
+# norm_expr = setup %>% dplyr::slice(1) %>% pluck(4,1)
+# contrast = setup %>% dplyr::slice(1) %>% pluck(5,1)
+# design = setup %>% dplyr::slice(1) %>% pluck(6,1)
+limma_result = setup %>%
+  transmute(series, day, class, limma_result = pmap(., .f = function(norm_expr, contrast, design, ...) {
+    stopifnot(colnames(norm_expr) == rownames(design))
+    lmFit(norm_expr, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(gene, contrast = term, logFC = estimate) %>%
+      filter(gene != "SRSF10") # very ugly! Need to find out why we get two logFC for this gene for every contrast
+  })) %>%
+  unnest(limma_result) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>%
+  nest(-series,-day, -class, .key = "limma_result")
+  
+saveRDS(limma_result, "output/in_vitro_benchmark/expr/limma_result.rds")
+
+# extract bad experiments (Those whose target has a logFC > 0)
+bad_experiments = limma_result %>%
+  unnest() %>%
+  filter(gene == target) %>%
+  filter(logFC >= 0) %>% 
+  distinct(contrast)
+
+saveRDS(bad_experiments, "output/in_vitro_benchmark/expr/bad_experiments.rds")
+```
+
+#### Run viper on contrasts
+```{r "run viper on contrasts}
+limma_result = readRDS("output/in_vitro_benchmark/expr/limma_result.rds")
+
+dorothea = dorothea_regulon_human_v1
+
+viper_result = limma_result %>%
+  transmute(series, day, class,
+            viper_result = limma_result %>% map(function(l) {
+              run_viper(E = l, 
+                        regulon = dorothea, 
+                        value_name = "logFC", 
+                        id_name = "contrast")
+              }))
+
+saveRDS(viper_result, "output/in_vitro_benchmark/expr/viper_result.rds")
+```
+
+
+#### Performance evaluation
+```{r "performance evaluation"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+viper_result = readRDS("output/in_vitro_benchmark/expr/viper_result.rds") %>%
+  unnest(viper_result) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  nest(-c(series, day, class), .key="viper_result")
+
+basic_setup = tribble(
+  ~confidence, ~group,
+  # "A", "single_conf",
+  # "B", "single_conf",
+  # "C", "single_conf",
+  # "D", "single_conf",
+  # "E", "single_conf",
+  "A", "multi_conf",
+  "AB", "multi_conf",
+  "ABC", "multi_conf",
+  "ABCD", "multi_conf",
+  "ABCDE", "multi_conf"
+) %>%
+    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
+                                                    "AB", "ABC", "ABCD", 
+                                                    "ABCDE")))
+
+
+    
+setup = basic_setup %>% 
+  group_by(confidence, group) %>%
+  mutate(viper_result = list(viper_result)) %>%
+  ungroup() %>%
+  unnest(viper_result)
+    
+# confidence = setup %>% pluck(1,1)
+# viper_result = setup %>% pluck(6,1)
+# series = "perturbseq"
+
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(confidence, viper_result, series, ...) {
+    message(confidence, "-", series)
+      conf_levels = str_split(confidence, "") %>% 
+        pluck(1)
+      
+      perturbed_tfs = viper_result %>%
+        distinct(target) %>%
+        dplyr::rename(tf = target)
+      
+      # extract number of uniquely covered tfs
+      coverage = viper_result %>% 
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        filter(tf == target) %>%
+        summarise(coverage = n_distinct(tf)) %>%
+        pull()
+      
+      viper_result %>%
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        mutate(response = case_when(tf == target ~ 1,
+                                    TRUE ~ 0),
+               response = factor(response, levels = c("1", "0")),
+               predictor = activity * -1,
+               coverage = coverage) %>%
+        select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-viper_result) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  roc_curve(response, predictor, options=list(direction = "<")) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/pr_coords.rds")
+
+
+  
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(group, confidence, series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("confidence", "group", "series")) %>%
+  dplyr::count(group, confidence, series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<")) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group", "class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<")) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<")) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<")) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group","class", 
+                                                "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/performance_result.rds")
+```
+
