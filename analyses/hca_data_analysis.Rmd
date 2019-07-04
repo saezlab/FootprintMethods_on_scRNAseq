@@ -1,0 +1,1318 @@
+---
+title: "progeny_dorothea_downsampling"
+author: "Christian Holland"
+date: "24/09/2018"
+output: html_document
+---
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(scran)
+library(tidyverse)
+library(tidylog)
+library(ggrepel)
+library(cowplot)
+library(myutils)
+library(furrr)
+library(pheatmap)
+library(AUCell)
+library(Rtsne)
+library(cluster)
+library(Matrix)
+library(umap)
+library(reticulate)
+library(furrr)
+library(viper)
+library(scMerge)
+library(ggsignif)
+library(ggpubr)
+library(rstatix)
+library(ggdendro)
+
+plan(multiprocess)
+options("tidylog.display" = list(print))
+options(future.globals.maxSize= 2097152000) # corresponds to 2 GB
+
+```
+
+```{r "load data and translate gene ids"}
+df = list.files("data/hca_data/expression_data", full.names = T) %>%
+  map_df(function(path) {
+    technology = basename(path) %>%
+      strsplit("[.]") %>%
+      pluck(1,1)
+    dat = get(load(path))
+    dat$UMI$downsampled_20000 %>%
+      rownames_to_column("gene") %>%
+      gather(cell, count, -gene) %>%
+      filter(count != 0) %>%
+      as_tibble() %>%
+      mutate(technology = technology)
+  })
+
+gene_annotation = read_csv("data/annotations/hgnc_ensembl_entrez.csv") %>%
+  distinct(hgnc_symbol, gene = ensembl_gene_id_version) %>%
+  drop_na()
+
+count_mat = df %>%
+  inner_join(gene_annotation, by="gene") %>%
+  select(cell, gene = hgnc_symbol, count, technology) %>%
+  mutate(cell = str_replace(cell, "[.]", "_"))
+
+saveRDS(count_mat, "output/hca_data/counts_all_technologies.rds")
+```
+### Data pre-processing
+```{r "pre-process data"}
+sce = get(load("data/hca_data/expression_data/sce.all.technologies.RData"))
+
+emat = assay(sce) %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+
+meta = colData(sce) %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("cell") %>%
+  as_tibble() %>%
+  dplyr::rename(technology = batch) %>%
+  mutate(technology = as_factor(technology))
+
+expr = meta %>% 
+  separate(cell, into = c("id"), remove = F) %>%
+  distinct(id, technology) %>%
+  select(technology, id) %>%
+  nest(-technology, .key="id") %>%
+  transmute(technology, emat = id %>% map(function(i) {
+    emat %>% 
+      select(contains(pull(i, id))) %>%
+      as.matrix() %>%
+      Matrix(sparse=T)
+  }))
+
+saveRDS(expr, "output/hca_data/expression_all_13_technologies.rds")
+saveRDS(meta, "output/hca_data/meta_df.rds")
+```
+
+### Exploraroty analysis
+#### Library sizes
+```{r "library sizes"}
+count_mat = readRDS("output/hca_data/expression_all_13_technologies.rds")
+df = count_mat %>%
+  transmute(technology, x = emat %>% map(function(emat) {
+    emat %>% 
+      as.matrix() %>% 
+      colSums() %>% 
+      enframe("cell", "libsize")
+  }))
+
+num_cells = df %>% 
+  unnest() %>% 
+  dplyr::count(technology)
+
+df %>% 
+  unnest() %>%
+  ggplot(aes(x=fct_reorder(technology, libsize, .fun = median), y=libsize)) +
+  geom_jitter(aes(color=technology), alpha=0.5) +
+  geom_violin(fill="white", aes(color=technology)) +
+  geom_text(data = num_cells, aes(x=technology, y = 20000, label = n)) +
+  labs(x="Technology", y= "Library size") +
+  theme(legend.position = "none") +
+  my_theme() +
+  coord_flip()
+```
+
+#### Numbers of different celltype per technology
+```{r "numbers of different celltype per technology"}
+meta = readRDS("output/hca_data/meta_df.rds")
+
+meta %>%
+  #filter(technology == "Quartz-Seq2") %>%
+  dplyr::count(technology, nnet2) %>%
+  ggplot(aes(x=nnet2, y=log2(n), fill=nnet2)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~technology, scales="free_x") +
+  theme(legend.position = "none") +
+  my_theme() +
+  geom_hline(yintercept = log2(50)) +
+  labs(y = "log2(count)", x="Celltype")
+```
+#### Gene coverage per technology
+```{r "gene coverage per technology"}
+count_mat = readRDS("output/hca_data/expression_all_13_technologies.rds")
+emat = count_mat[1,2] %>% pluck(1,1)
+df = count_mat %>%
+  transmute(technology, x = emat %>% map(function(emat) {
+    emat %>% 
+      summary() %>%
+      as_tibble() %>%
+      dplyr::rename(cell=j) %>%
+      dplyr::count(cell)
+  }))
+
+num_cells = df %>% 
+  unnest() %>%
+  distinct(technology, cell) %>%
+  dplyr::count(technology)
+
+df %>%
+  unnest(x) %>%
+  ggplot(aes(x=fct_reorder(technology, n, .fun=median), y=n, color=technology)) +
+  geom_boxplot() +
+  geom_text(data = num_cells, aes(x=technology, y = 7000, label = n)) +
+  labs(x = "Technology", y="Number of non-zero genes") +
+  my_theme() +
+  theme(legend.position = "none") +
+  coord_flip()
+```
+
+#### Relationship between number of non-zero genes and number of cells
+```{r "relationship between number of non-zero genes and number of cells}
+count_mat = readRDS("output/hca_data/expression_all_13_technologies.rds")
+df = count_mat %>%
+  transmute(technology, x = emat %>% map(function(emat) {
+    emat %>% 
+      summary() %>%
+      as_tibble() %>%
+      dplyr::rename(cell=j) %>%
+      dplyr::count(cell, name = "num_non_zero_genes") %>%
+      add_tally(name = "num_cells") %>%
+      select(-cell)
+  }))
+
+df %>%
+  unnest() %>%
+  group_by(technology) %>%
+  summarise(num_non_zero_genes = mean(num_non_zero_genes),
+            num_cells = mean(num_cells)) %>%
+  ggplot(aes(x=num_cells, y=num_non_zero_genes, label=technology)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  my_theme() +
+  geom_text_repel()
+```
+
+#### Summary Exploratory analysis
+```{r "Exploratory analysis"}
+plot_grid(plot_grid(lib_size, non_zero_genes, labels="AUTO"), num_cell_types, labels=c("", "C"), ncol=1)
+```
+### Normalization
+#### Individual normalization with srcan
+```{r "Individual normalization with scran}
+count_mat = readRDS("output/hca_data/expression_all_13_technologies.rds")
+
+expr_norm = count_mat %>%
+  transmute(technology, norm = emat %>% map(function(emat) {
+    SingleCellExperiment(list(counts=emat)) %>%
+      computeSumFactors() %>%
+      normalize() %>%
+      exprs()
+  }))
+
+saveRDS(expr_norm, "output/hca_data/norm_expression_all_13_technologies.rds")
+```
+
+#### Normlization across all technologies
+```{r "normlization across all technologies}
+sce = get(load("data/hca_data/expression_data/sce.all.technologies.RData"))
+
+scater::plotPCA(
+  sce, colour_by="batch"
+)
+
+emat = count_mat %>% 
+  pull(emat) %>%
+  purrr::reduce(cbind)
+```
+
+### Run Footprint methods
+#### Run PROGENy with various footprint number
+```{r "run progeny with various footprint number"}
+expr_norm = readRDS("output/hca_data/norm_expression_all_13_technologies.rds") %>%
+  mutate(count = 6) %>% 
+  uncount(count) %>%
+  group_by(technology) %>%
+  mutate(footprints = c(100,200,300,500,1000, "all")) %>%
+  ungroup() %>%
+  dplyr::rename(expr = norm)
+
+model = readRDS("data/progeny_models/full_matrix/full_progeny_matrix.rds")
+m_100 = model %>% group_by(pathway) %>% top_n(100, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+# top 200 
+m_200 = model %>% group_by(pathway) %>% top_n(200, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+# top 300 
+m_300 = model %>% group_by(pathway) %>% top_n(300, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+# top 500 
+m_500 = model %>% group_by(pathway) %>% top_n(500, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+# top 1000 
+m_1000 = model %>% group_by(pathway) %>% top_n(1000, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+# all 
+m_all = model %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill=0) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+models = tribble(
+  ~M, ~footprints,
+  m_100, 100,
+  m_200, 200,
+  m_300, 300,
+  m_500, 500,
+  m_1000, 1000,
+  m_all, "all"
+) 
+
+setup = expr_norm %>%
+  left_join(models, by="footprints") %>%
+  mutate(footprints = as_factor(footprints))
+
+sc_progeny = function(expr, M, ...) {
+  common_genes = intersect(rownames(expr), rownames(M))
+  expr_matched = expr[common_genes,,drop=FALSE] %>%
+    t()
+  M_matched = M[common_genes,, drop=FALSE] %>%
+    data.matrix()
+  
+  stopifnot(names(expr_matched) == rownames(M_matched))
+  
+  scores = expr_matched %*% M_matched
+  res = scale(scores)
+  return(res)
+}
+
+progeny_scores = setup %>%
+  transmute(technology, footprints, progeny = pmap(., .f=sc_progeny))
+
+saveRDS(progeny_scores, "output/hca_data/progeny_scores_all_13_technologies.rds")
+```
+
+#### Run VIPER
+```{r "run viper"}
+expr_norm = readRDS("output/hca_data/norm_expression_all_13_technologies.rds")
+regulon = dorothea_regulon_human_v1 %>%
+  filter(confidence %in% c("A","B")) %>%
+  df2regulon()
+
+sc_viper = function(expr, regulon, ...) {
+  res = viper(eset = as.matrix(expr), regulon = regulon, nes = T, method = "scale",
+              minsize = 4, eset.filter = F)
+  return(res)
+}
+
+viper_scores = expr_norm %>%
+  transmute(technology, viper = norm %>% future_map(sc_viper, regulon=regulon, .progress = T))
+
+saveRDS(viper_scores, "output/hca_data/viper_scores_all_13_technologies.rds")
+```
+#### Summarize footprint scores
+```{r "summarize footprint scores}
+meta = readRDS("output/hca_data/meta_df.rds")
+p = readRDS("output/hca_data/progeny_scores_all_13_technologies.rds") %>%
+  mutate(method = "progeny") %>%
+  transmute(technology, footprints, method, activity = progeny %>% map(function(progeny) {
+    progeny %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("cell") %>%
+      as_tibble() %>%
+      gather(feature, activity, -cell)
+  })) 
+d = readRDS("output/hca_data/viper_scores_all_13_technologies.rds") %>%
+  mutate(method = "dorothea") %>%
+  transmute(technology, method, activity = viper %>% map(function(dorothea) {
+    dorothea %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("feature") %>%
+      as_tibble() %>%
+      gather(cell, activity, -feature)
+  })) 
+
+
+summarized_footprint_scores = bind_rows(p,d) %>%
+  unnest() %>%
+  inner_join(meta, by=c("cell", "technology")) %>%
+  rename(celltype = nnet2) %>%
+  group_by(technology, footprints, method, feature, celltype) %>%
+  summarise(m = mean(activity),
+            s = sd(activity)) %>%
+  ungroup()
+
+saveRDS(summarized_footprint_scores, "output/hca_data/summarized_footprints_scores.rds")
+```
+
+#### Visualization of footprint scores
+```{r "visualization of footprint scores}
+meta = readRDS("output/hca_data/meta_df.rds")
+p = readRDS("output/hca_data/progeny_scores_all_13_technologies.rds") %>%
+  mutate(method = "progeny") %>%
+  transmute(technology, method, activity = progeny %>% map(function(progeny) {
+    progeny %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("cell") %>%
+      as_tibble() %>%
+      gather(feature, activity, -cell)
+  })) 
+d = readRDS("output/hca_data/viper_scores_all_13_technologies.rds") %>%
+  mutate(method = "dorothea") %>%
+  transmute(technology, method, activity = viper %>% map(function(dorothea) {
+    dorothea %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("feature") %>%
+      as_tibble() %>%
+      gather(cell, activity, -feature)
+  })) 
+
+
+summarized_footprint_scores = bind_rows(p,d) %>%
+  unnest() %>%
+  inner_join(meta, by=c("cell", "technology")) %>%
+  rename(celltype = nnet2) %>%
+  group_by(technology, method, feature, celltype) %>%
+  summarise(m = mean(activity),
+            s = sd(activity)) %>%
+  ungroup()
+
+saveRDS()
+
+mean_progeny = summarized_footprint_scores %>%
+  filter(technology == "Quartz-Seq2" & method == "progeny") %>%
+  select(-method, -s) %>%
+  spread(feature, m) %>%
+  write_csv("output/hca_data/mean_progeny.csv")
+
+sd_progeny = summarized_footprint_scores %>%
+  filter(technology == "Quartz-Seq2" & method == "progeny") %>%
+  select(-method, -m) %>%
+  spread(feature, s) %>%
+  write_csv("output/hca_data/sd_progeny.csv")
+
+mean_viper = summarized_footprint_scores %>%
+  filter(technology == "Quartz-Seq2" & method == "dorothea") %>%
+  select(-method, -s) %>%
+  spread(feature, m) %>%
+  write_csv("output/hca_data/mean_dorothea.csv")
+
+sd_viper = summarized_footprint_scores %>%
+  filter(technology == "Quartz-Seq2" & method == "dorothea") %>%
+  select(-method, -m) %>%
+  spread(feature, s) %>%
+  write_csv("output/hca_data/sd_dorothea.csv")
+
+
+stat_df = df %>%
+  filter(method == "progeny") %>%
+  compare_means(activity ~ nnet2, data = ., group.by="feature") %>%
+  mutate(y_pos = case_when(
+    group1 == "CD14+ Monocytes" & group2 == "CD4 T cells" ~ 3.25,
+    group1 == "CD4 T cells" & group2 == "HEK cells" ~ 3.75,
+    TRUE ~ 5
+    ))
+
+stat_df = df %>%
+  filter(method == "progeny") %>%
+  group_by(feature) %>%
+  wilcox_test(activity ~ nnet2, data=.) %>%
+  adjust_pvalue(method ="BH") %>%
+  add_significance("p.adj") %>%
+  mutate(feature = rep(c("Androgen", "EGFR", "Estrogen", "Hypoxia", "JAK-STAT", "MAPK", "NFkB", "p53", "PI3K", "TGFb", "TNFa", "Trail", "VEGF", "WNT"), each=3)) %>%
+  mutate(y_pos = case_when(
+    group1 == "CD14+ Monocytes" & group2 == "CD4 T cells" ~ 3.25,
+    group1 == "CD4 T cells" & group2 == "HEK cells" ~ 3.75,
+    TRUE ~ 5
+    ))
+# volcano plot
+pathway_volcano_plot = stat_df %>%
+  ggplot(aes(x=statistic, y=-log10(p.adj), label=feature)) +
+  geom_point(aes(color=feature), size=3) +
+  my_theme() +
+  geom_text_repel() +
+  labs(x="effect size")
+
+# sum of effect sizes across comparisons
+sum_effect_size = stat_df %>%
+  unite(comparison, group1, group2, sep="_vs_") %>%
+  ggplot(aes(x=comparison, y=statistic)) +
+  geom_col(aes(fill=comparison),color="black") +
+  my_theme() +
+  theme(axis.text.x = element_blank(),
+        legend.position = "top") +
+  guides(fill = guide_legend(title.position = "top", ncol = 1))
+
+
+pathway_overview = df %>% 
+  filter(method == "progeny") %>%
+  #filter(technology == "inDrop") %>%
+  ggplot(aes(x=nnet2, y=activity)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_jitter(aes(color=nnet2), alpha=.3) +
+  geom_violin(aes(color=nnet2), fill="white") +
+  facet_wrap(~feature, scales="free_y") +
+  ggsignif::geom_signif(
+    data=stat_df,
+    aes(xmin=group1, xmax=group2, annotations=p.adj.signif, y_position=y_pos),
+    manual=TRUE
+  ) +
+  lims(y = c(-5.5,6.5)) +
+  my_theme() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        legend.position = "none") +
+  labs(x=NULL)
+
+plot_grid(pathway_overview, ncol=1, plot_grid(pathway_volcano_plot, sum_effect_size, ncol=2, rel_widths = c(1,1)), rel_heights = c(2.5,1))
+pathway_overview
+
+
+df %>% 
+  filter(method == "dorothea") %>%
+  filter(feature %in% c("NFKB1", "NFKB2", "SMAD1", "SMAD2", "STAT1", "STAT2")) %>%
+  ggplot(aes(x=nnet2, y=activity, color=nnet2)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_jitter(aes(color=nnet2), alpha=.3) +
+  geom_violin(fill="white") +
+  facet_wrap(~feature, scales="free_y") +
+  my_theme() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        legend.position = "none") +
+  labs(x=NULL)
+```
+
+### Clustering
+#### Setup hierarchy structure
+```{r, "setup and visualize hierarchy structure}
+# setup hierarchy structure
+hierarchy = readRDS("output/hca_data/meta_df.rds") %>%
+  filter(nnet2 != "unclassified") %>%
+  distinct(cell, celltype = nnet2) %>%
+  arrange(cell) %>%
+  mutate(
+    # hierarchy level 0
+    hrchy0_id = as.integer(as_factor(celltype)),
+    hrchy0_label = celltype,
+    # hierarchy level 1
+    hrchy1_id = case_when(
+      celltype == "B cells" ~ 1,
+      celltype == "Megakaryocytes" ~ 2,
+      celltype == "NK cells" ~ 3,
+      celltype %in% c("CD4 T cells","CD8 T cells") ~ 4,
+      celltype == "Dendritic cells" ~ 5,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes") ~ 6,
+      celltype == "HEK cells" ~ 7),
+    hrchy1_label = case_when(
+      celltype == "B cells" ~ "B cells",
+      celltype == "Megakaryocytes" ~ "Megakaryocytes",
+      celltype == "NK cells" ~ "NK cells",
+      celltype %in% c("CD4 T cells","CD8 T cells") ~ "T cells",
+      celltype == "Dendritic cells" ~ "Dendritic cells",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes") ~ "Monocytes",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 2
+    hrchy2_id = case_when(
+      celltype == "B cells" ~ 1,
+      celltype == "Megakaryocytes" ~ 2,
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells") ~ 3,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~ 
+        4,
+      celltype == "HEK cells" ~ 5),
+    hrchy2_label = case_when(
+      celltype == "B cells" ~ "B cells",
+      celltype == "Megakaryocytes" ~ "Megakaryocytes",
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells") ~ "T + NK cells",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~
+        "Monocytes + Dendritic",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 3
+    hrchy3_id = case_when(
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells", "B cells") ~ 1,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells", 
+                      "Megakaryocytes") ~ 2,
+      celltype == "HEK cells" ~ 3),
+    hrchy3_label = case_when(
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells", "B cells") ~ 
+        "unknown",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells", 
+                      "Megakaryocytes") ~ "Myeloid",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 4
+    hrchy4_id = case_when(
+      celltype == "HEK cells" ~ 1,
+      TRUE ~ 2),
+    hrchy4_label = case_when(
+      celltype == "HEK cells" ~ "cell line",
+      TRUE ~ "cell type")) %>%
+  gather(key, value, -cell, -celltype) %>%
+  separate(key, into=c("hrchy_level","key"), sep = "_") %>% 
+  spread(key, value) %>%
+  mutate(id = as.integer(id)) %>%
+  nest(-hrchy_level, .key="cluster_vec")
+
+saveRDS(hierarchy, "output/hca_data/cluster_hierarchy.rds")
+
+# dendogramm
+a = list()
+a$merge <- matrix(c(-1,-2,
+                    -3,-4,
+                    1,-5,
+                    2,-6,
+                    3,-7,
+                    4,-8,
+                    5,6,
+                    7,-9), nc=2, byrow=TRUE ) 
+a$height <- c(1,1,2,2,3,3,4,5)    # define merge heights
+a$order <- c(3,4,6,7,5,8,1,2,9)
+a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes","NK cells","Dendritic cells","B cells","Megakaryocytes","HEK cells") # labels of leaves
+class(a) <- "hclust"        # make it an hclust object
+dendo = ggdendrogram(a, theme_dendro = FALSE) +
+  labs(y = "Hierarchy level", x=NULL) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(angle = 0))
+
+saveRDS(dendo, "fig/clustering_analysis/dendogram.rds")
+```
+#### Setup hierarchy structure wo Megakaryocytes
+```{r, "setup and visualize hierarchy structure}
+# setup hierarchy structure
+hierarchy = readRDS("output/hca_data/meta_df.rds") %>%
+  filter(!nnet2 %in% c("unclassified", "Megakaryocytes")) %>%
+  distinct(cell, celltype = nnet2) %>%
+  arrange(cell) %>%
+  mutate(
+    # hierarchy level 0
+    hrchy0_id = as.integer(as_factor(celltype)),
+    hrchy0_label = celltype,
+    # hierarchy level 1
+    hrchy1_id = case_when(
+      celltype == "B cells" ~ 1,
+      celltype == "NK cells" ~ 2,
+      celltype %in% c("CD4 T cells","CD8 T cells") ~ 3,
+      celltype == "Dendritic cells" ~ 4,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes") ~ 5,
+      celltype == "HEK cells" ~ 6),
+    hrchy1_label = case_when(
+      celltype == "B cells" ~ "B cells",
+      celltype == "NK cells" ~ "NK cells",
+      celltype %in% c("CD4 T cells","CD8 T cells") ~ "T cells",
+      celltype == "Dendritic cells" ~ "Dendritic cells",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes") ~ "Monocytes",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 2
+    hrchy2_id = case_when(
+      celltype == "B cells" ~ 1,
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells") ~ 2,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~ 
+        3,
+      celltype == "HEK cells" ~ 4),
+    hrchy2_label = case_when(
+      celltype == "B cells" ~ "B cells",
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells") ~ "T + NK cells",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~
+        "Monocytes + Dendritic",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 3
+    hrchy3_id = case_when(
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells", "B cells") ~ 1,
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~ 2,
+      celltype == "HEK cells" ~ 3),
+    hrchy3_label = case_when(
+      celltype %in% c("CD4 T cells","CD8 T cells","NK cells", "B cells") ~ 
+        "unknown",
+      celltype %in% c("CD14+ Monocytes","FCGR3A+ Monocytes","Dendritic cells") ~ "Myeloid",
+      celltype == "HEK cells" ~ "HEK cells"),
+    # hierarchy level 4
+    hrchy4_id = case_when(
+      celltype == "HEK cells" ~ 1,
+      TRUE ~ 2),
+    hrchy4_label = case_when(
+      celltype == "HEK cells" ~ "cell line",
+      TRUE ~ "cell type")) %>%
+  gather(key, value, -cell, -celltype) %>%
+  separate(key, into=c("hrchy_level","key"), sep = "_") %>% 
+  spread(key, value) %>%
+  mutate(id = as.integer(id)) %>%
+  nest(-hrchy_level, .key="cluster_vec")
+
+saveRDS(hierarchy, "output/hca_data/cluster_hierarchy_wo_megak.rds")
+
+# dendogramm
+a = list()
+a$merge <- matrix(c(-1,-2,
+                    -3,-4,
+                    1,-5,
+                    2,-6,
+                    3,-7,
+                    4,-8,
+                    5,6,
+                    7,-9), nc=2, byrow=TRUE ) 
+a$height <- c(1,1,2,2,3,3,4,5)    # define merge heights
+a$order <- c(3,4,6,7,5,8,1,2,9)
+a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes","NK cells","Dendritic cells","B cells","Megakaryocytes","HEK cells") # labels of leaves
+class(a) <- "hclust"        # make it an hclust object
+dendo = ggdendrogram(a, theme_dendro = FALSE) +
+  labs(y = "Hierarchy level", x=NULL) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(angle = 0))
+
+saveRDS(dendo, "fig/clustering_analysis/dendogram.rds")
+```
+
+#### Prepare different input matrices for clustering with UMAP
+```{r "prepare different input matrices for clustering with UMAP}
+# set seed
+set.seed(123)
+# load meta data but exclude 
+meta = readRDS("output/hca_data/meta_df.rds") %>%
+  filter(!nnet2 %in% c("unclassified", "Megakaryocytes")) %>%
+  nest(-technology, .key="meta")
+
+norm_expr = readRDS("output/hca_data/norm_expression_all_13_technologies.rds") %>%
+  mutate(class = "normalized_expression") %>%
+  rename(mat = norm)
+
+most_var_norm = readRDS("output/hca_data/norm_expression_all_13_technologies.rds") %>%
+  transmute(technology, mat = norm %>% future_map(function(norm) {
+    most_var_genes = norm %>% 
+      apply(.,1,var) %>%
+      enframe("gene", "variance") %>%
+      top_n(2500, variance) %>%
+      pull(gene)
+    
+    norm[most_var_genes, ]
+  }, .progress = T)) %>%
+  mutate(class = "most_var_normalized_expr")
+
+progeny = readRDS("output/hca_data/progeny_scores_all_13_technologies.rds") %>%
+  mutate(class = str_c("progeny",footprints)) %>%
+  rename(mat = progeny) %>%
+  select(-footprints)
+
+# contains activities for 115 TFs
+viperAB = readRDS("output/hca_data/viper_scores_all_13_technologies.rds") %>%
+  mutate(class = "viperAB") %>%
+  rename(mat=viper)
+
+raw_data = readRDS("output/hca_data/expression_all_13_technologies.rds") %>%
+  mutate(class = "raw_expression") %>%
+  rename(mat = emat)
+
+most_var_raw = readRDS("output/hca_data/expression_all_13_technologies.rds") %>%
+  transmute(technology, mat = emat %>% future_map(function(emat) {
+    most_var_genes = emat %>% 
+      apply(.,1,var) %>%
+      enframe("gene", "variance") %>%
+      top_n(2500, variance) %>%
+      pull(gene)
+    
+    emat[most_var_genes, ]
+  }, .progress = T)) %>%
+  mutate(class = "most_var_raw_expr")
+
+footprint_genes = progeny_matrix_human_v1 %>% distinct(gene) %>% pull()
+footprints = readRDS("output/hca_data/norm_expression_all_13_technologies.rds") %>%
+  transmute(technology, mat = norm %>% map(function(norm) {
+    z = intersect(rownames(norm), footprint_genes)
+    norm[z,]
+  })) %>%
+  mutate(class = "footprint_genes")
+
+tf_genes = dorothea_regulon_human_v1 %>% filter(confidence %in% c("A", "B")) %>%
+  distinct(tf) %>% pull()
+
+tf_expression = readRDS("output/hca_data/norm_expression_all_13_technologies.rds") %>%
+  transmute(technology, mat = norm %>% map(function(norm) {
+    z = intersect(rownames(norm), tf_genes)
+    norm[z,]
+  })) %>%
+  mutate(class = "tf_genes")
+
+set.seed(1234)
+random_1301_genes = readRDS("output/hca_data/norm_expression_all_13_technologies.rds")
+random_1301_genes_res = map_df(seq_len(10), ~random_1301_genes) %>%
+  mutate(rep = rep(seq_len(10), each=13)) %>%
+  group_by(rep) %>%
+  mutate(seed = sample(1:1e6,1)) %>% 
+  ungroup() %>%
+  transmute(technology, rep, mat = map2(norm, seed, function(norm, seed) {
+    set.seed(seed)
+    genes = rownames(norm) %>%
+      sample(1301)
+    norm[genes,]
+  })) %>%
+  mutate(class = "random_footprints")
+
+set.seed(12345)
+random_115_genes = readRDS("output/hca_data/norm_expression_all_13_technologies.rds")
+random_115_genes_res = map_df(seq_len(10), ~random_115_genes) %>%
+  mutate(rep = rep(seq_len(10), each=13)) %>%
+  group_by(rep) %>%
+  mutate(seed = sample(1:1e6,1)) %>% 
+  ungroup() %>%
+  transmute(technology, rep, mat = map2(norm, seed, function(norm, seed) {
+    set.seed(seed)
+    genes = rownames(norm) %>%
+      sample(115)
+    norm[genes,]
+  })) %>%
+  mutate(class = "random_115_features")
+
+set.seed(123456)
+random_14_genes = readRDS("output/hca_data/norm_expression_all_13_technologies.rds")
+random_14_genes_res = map_df(seq_len(10), ~random_14_genes) %>%
+  mutate(rep = rep(seq_len(10), each=13)) %>%
+  group_by(rep) %>%
+  mutate(seed = sample(1:1e6,1)) %>% 
+  ungroup() %>%
+  transmute(technology, rep, mat = map2(norm, seed, function(norm, seed) {
+    set.seed(seed)
+    genes = rownames(norm) %>%
+      sample(14)
+    norm[genes,]
+  })) %>%
+  mutate(class = "random_14_features")
+
+
+df = bind_rows(
+  norm_expr, progeny, raw_data, viperAB, footprints, tf_expression,
+  random_1301_genes_res, random_14_genes_res, random_115_genes_res,
+  most_var_raw, most_var_norm
+  ) %>%
+  left_join(meta)
+
+saveRDS(df,"output/hca_data/cluster_input_wo_megak.rds")
+```
+
+#### Clustering
+```{r "clustering"}
+do_umap = function(mat, meta, class, technology,...) {
+  message(technology, " - ", class)
+  if (str_detect(class, "progeny")) {
+    mat = t(mat)
+  }
+  cells = meta %>% pull(cell)
+  stopifnot(colnames(mat[,cells]) == meta$cell)
+  
+  mat[,cells] %>%
+    as.matrix() %>%
+    t() %>%
+    umap(method="umap-learn") %>%
+    pluck("layout") %>%
+    data.frame(check.names = F, stringsAsFactors = F) %>%
+    rownames_to_column("cell") %>%
+    rename(x = `1`, y=`2`) %>%
+    as_tibble() %>%
+    left_join(hrchy, by="cell") %>%
+    arrange(cell)
+}
+df = readRDS("output/hca_data/cluster_input_wo_megak.rds")
+hrchy = readRDS("output/hca_data/cluster_hierarchy_wo_megak.rds") %>%
+  unnest(cluster_vec) %>% 
+  select(-id) %>% 
+  spread(hrchy_level, label)
+# 
+# mat = df[1,2] %>% pluck(1,1)
+# meta = df[1,5] %>% pluck(1,1)
+
+res = df %>%
+  transmute(technology, class, rep, 
+            coords = future_pmap(., .f=do_umap, .progress = T))
+
+saveRDS(res, "output/hca_data/umap_coords_wo_megak.rds")
+```
+
+#### Silhouettes
+```{r "silhouettes"}
+do_sil = function(coords, technology, class,...) {
+  message(technology, "-", class)
+  
+  res = h %>%
+    transmute(hrchy_level, sil = pmap(., .f=function(cluster_vec, hrchy_level,...) {
+      message(hrchy_level)
+      cv = cluster_vec %>%
+        filter(cell %in% coords$cell)
+      meta_cluster = cv %>%
+        distinct(label, id) %>%
+        mutate_if(is.integer, as.character)
+        
+      stopifnot(coords$cell == cv$cell)
+      dist_mat = coords %>%
+        select_if(is.numeric) %>%
+        dist()
+  
+      s = silhouette(cv$id, dist_mat)
+      summary_s = s %>% summary()
+    
+    
+      summary_s %>%
+          pluck("clus.avg.widths") %>%
+          enframe("id", "avg_width") %>%
+          left_join(meta_cluster) %>%
+          mutate(mean_avg_width = pluck(summary_s, "avg.width"),
+                 size = as.vector(pluck(summary_s, "clus.sizes")),
+                 obj = list(s))
+    })) %>%
+    unnest(sil)
+}
+
+umap_coords = readRDS("output/hca_data/umap_coords_wo_megak.rds")
+h = readRDS("output/hca_data/cluster_hierarchy_wo_megak.rds")
+
+sil_result = umap_coords %>%
+  mutate(sil = future_pmap(., .f=do_sil, .progress = T))
+
+saveRDS(sil_result, "output/hca_data/silhouette_results_wo_megak.rds")
+```
+
+
+
+#### Prepare silhouette correlation
+```{r "prepare silhouette correlation"}
+sil_res = readRDS("output/hca_data/silhouette_results_wo_megak.rds") %>%
+  filter(!class %in% c("raw_expression", "most_var_raw_expr")) %>%
+  mutate(class = factor(class, levels = c("raw_expression", 
+                                          "most_var_raw_expr", 
+                                          "normalized_expression", 
+                                          "most_var_normalized_expr", 
+                                          "progeny100",
+                                          "progeny200",
+                                          "progeny300",
+                                          "progeny500",
+                                          "progeny1000",
+                                          "progenyall",
+                                          "random_14_features", 
+                                          "footprint_genes", 
+                                          "random_footprints", 
+                                          "viperAB", 
+                                          "random_115_features", 
+                                          "tf_genes"))) %>%
+  mutate(g = case_when(str_detect(class, "random") ~ "control",
+                       class %in% c("tf_genes", "footprint_genes") ~ "footprint_alternative",
+                   TRUE ~ "no_control"))
+
+# correlations
+cor = sil_res %>% 
+  mutate(gg = case_when(class == "normalized_expression" ~ "reference",
+                        class != "normalized_expression" ~ "case")) %>%
+  unnest(sil) %>%
+  filter(!class %in% c("raw_expression", "most_var_raw_expr")) %>% 
+  mutate(tool = case_when(class %in% c("viperAB", "random_115_features", 
+                                       "tf_genes") ~ "viper",
+                          class %in% c("progeny100", "progeny200", "progeny300",
+                                       "progeny500", "progeny1000", 
+                                       "progenyall", "random_14_features") ~
+                            "progeny",
+                          class %in% c("random_footprints","footprint_genes") ~
+                            "progeny_footprints",
+                          class %in% c("most_var_normalized_expr") ~ "mvg")) %>%
+  group_by(technology, class,gg, hrchy_level, tool) %>%
+  summarise(m = mean(mean_avg_width)) %>%
+  ungroup()
+
+saveRDS(cor, "output/hca_data/silhouette_correlation_wo_megak.rds")
+```
+
+#### New cluster visualization
+```{r "new cluster visualization"}
+sil_res = readRDS("output/hca_data/silhouette_results.rds") %>%
+  filter(!class %in% c("raw_expression", "most_var_raw_expr", "most_var_normalized_expr")) %>%
+  mutate(class = factor(class, levels = c("raw_expression", 
+                                          "most_var_raw_expr", 
+                                          "normalized_expression", 
+                                          "most_var_normalized_expr", 
+                                          "progeny100",
+                                          "progeny200",
+                                          "progeny300",
+                                          "progeny500",
+                                          "progeny1000",
+                                          "progenyall",
+                                          "random_14_features", 
+                                          "footprint_genes", 
+                                          "random_footprints", 
+                                          "viperAB", 
+                                          "random_115_features", 
+                                          "tf_genes"))) %>%
+  mutate(g = case_when(str_detect(class, "random") ~ "control",
+                       class %in% c("tf_genes", "footprint_genes") ~ "footprint_alternative",
+                   TRUE ~ "no_control"))
+
+avg_sil = sil_res %>%
+  unnest(sil) %>%
+  group_by(technology, class, hrchy_level,g) %>%
+  summarise(m = mean(mean_avg_width,),
+            s = sd(mean_avg_width)) %>%
+  ungroup()
+
+
+
+# mean silhouette scores across all cell types/cell lines
+global_sil_width_overview = avg_sil %>%
+  ggplot(aes(x=class, y=m, fill=g)) +
+  geom_col() +
+  facet_grid(technology~hrchy_level) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  theme(strip.text.y = element_text(angle = 0))
+
+saveRDS(global_sil_width_overview, 
+        "fig/clustering_analysis/global_sil_width_overview.rds")
+
+
+# correlations
+cor = sil_res %>% 
+  mutate(gg = case_when(class == "normalized_expression" ~ "reference",
+                        class != "normalized_expression" ~ "case")) %>%
+  unnest(sil) %>%
+  filter(!class %in% c("raw_expression", "most_var_raw_expr", 
+                       "most_var_normalized_expr")) %>% 
+  mutate(tool = case_when(class %in% c("viperAB", "random_115_features", 
+                                       "tf_genes") ~ "viper",
+                          class %in% c("progeny100", "progeny200", "progeny300",
+                                       "progeny500", "progeny1000", 
+                                       "progenyall", "random_14_features") ~
+                            "progeny",
+                          class %in% c("random_footprints","footprint_genes") ~
+                            "progeny_footprints")) %>%
+  group_by(technology, class,gg, hrchy_level, tool) %>%
+  summarise(m = mean(mean_avg_width)) %>%
+  ungroup()
+
+ref = cor %>% filter(gg == "reference") %>%
+  spread(gg, m) %>%
+  select(-class, -tool)
+
+case = cor %>% filter(gg == "case") %>%
+  spread(gg, m)
+
+progeny_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "progeny")
+
+pfootprints_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "progeny_footprints")
+
+dorothea_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "viper")
+
+progeny_cor_plot = progeny_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  facet_wrap(~hrchy_level, scales="free") +
+  labs(x="Mean silhouette scores of UMAP based on normalized expression scores", y = "Mean silhouette scores of UMAP based on ...")
+saveRDS(progeny_cor_plot, "fig/clustering_analysis/progeny_cor_plot.rds")
+
+pfootprints_cor_plot = pfootprints_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  facet_wrap(~hrchy_level, scales="free") +
+  labs(x="Mean silhouette scores of UMAP based on normalized expression scores", y = "Mean silhouette scores of UMAP based on ...")
+saveRDS(pfootprints_cor_plot, "fig/clustering_analysis/pfootprints_cor_plot.rds")
+
+dorothea_cor_plot = dorothea_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha=0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  facet_wrap(~hrchy_level) +
+  labs(x="Mean silhouette scores of UMAP based on normalized expression scores", y = "Mean silhouette scores of UMAP based on ...")
+ggplotly(dorothea_cor_plot)
+saveRDS(dorothea_cor_plot, "fig/clustering_analysis/dorothea_cor_plot.rds")
+
+
+
+# example UMAP plots
+# showing an example where clustering in bad on gene expression bad good/better 
+# on viper scores
+viper_greater_norm = sil_res %>%
+  filter(technology == "Drop-Seq") %>%
+  filter(class %in% c("normalized_expression", "viperAB")) %>%
+  unnest(coords) %>%
+  ggplot(aes(x=x, y=y, color=hrchy2)) +
+  geom_point() +
+  theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank()) +
+  scale_colour_discrete(drop=FALSE) +
+  facet_wrap(~class, scales="free")
+
+# showing an example where clustering is good on gene expression and good on 
+# viper scores
+viper_equals_norm = sil_res %>%
+  filter(technology == "Smart-Seq2") %>%
+  filter(class %in% c("normalized_expression", "viperAB")) %>%
+  unnest(coords) %>%
+  select(-celltype) %>%
+  gather(key, value, starts_with("hrchy")) %>%
+  ggplot(aes(x=x, y=y, color=value)) +
+  geom_point() +
+  theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank()) +
+  scale_colour_discrete(drop=FALSE) +
+  facet_grid(class~key, scales="free") +
+  my_theme()
+
+saveRDS(viper_equals_norm, "fig/clustering_analysis/viper_equals_norm.rds")
+
+
+# cluster specific silhouette widths
+# silhouettes for cluster id
+technology = "Smart-Seq2"
+sil_res %>%
+  unnest(sil) %>%
+  filter(technology == technology) %>%
+  group_by(technology, class, hrchy_level, g, label) %>%
+  summarise(val = mean(avg_width)) %>%
+  ungroup() %>%
+  ggplot(aes(x=label,y=val, fill=label)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_grid(hrchy_level~class, scales = "free_y") +
+  theme(strip.text.x = element_text(angle = 90)) +
+  scale_colour_discrete(drop=FALSE) +
+  labs(subtitle = technology)
+
+saveRDS(viper_greater_norm, "fig/clustering_analysis/viper_greater_norm.rds")
+```
+
+#### Cluster visualization
+```{r "cluster visualization}
+res = readRDS("output/hca_data/silhouette_results.rds") %>%
+  mutate(class = factor(class, levels = c("raw_expression", 
+                                          "most_var_raw_expr", 
+                                          "normalized_expression", 
+                                          "most_var_normalized_expr", 
+                                          "progeny100", 
+                                          "random_14_features", 
+                                          "footprint_genes", 
+                                          "random_footprints", 
+                                          "viperAB", 
+                                          "random_115_features", 
+                                          "tf_genes")))
+# mean average width per technology and class
+res %>%
+  filter(technology == "Quartz-Seq2") %>%
+  unnest(sil) %>%
+  group_by(technology, rep, class) %>%
+  mutate(num_celltypes = n()) %>%
+  ungroup() %>%
+  distinct(technology, rep, class, num_celltypes, mean_avg_width) %>%
+  group_by(technology, class) %>% 
+  summarise(mean_avg_width = mean(mean_avg_width),
+            num_celltypes = mean(num_celltypes)) %>%
+  ungroup() %>%
+  ggplot(aes(x=fct_reorder(technology, mean_avg_width), y=mean_avg_width, fill=num_celltypes)) +
+  geom_col() +
+  facet_wrap(~class) +
+  my_theme() +
+  coord_flip() +
+  labs(x=NULL)
+
+# silhouette results for best performant technology
+res %>%
+  filter(technology == "Quartz-Seq2") %>%
+  filter(!(class %in% c("most_var_normalized_expr", "most_var_raw_expr", "raw_expression"))) %>%
+  unnest(sil) %>%
+  distinct(technology, rep, class, mean_avg_width) %>%
+  group_by(technology, class) %>% 
+  summarise(mean_avg_width = mean(mean_avg_width)) %>%
+  ungroup() %>%
+  ggplot(aes(x=fct_reorder(class, mean_avg_width), y=mean_avg_width, fill=class)) +
+  geom_col() +
+  #facet_wrap(~class) +
+  my_theme() +
+  coord_flip() +
+  labs(x=NULL) +
+  theme(legend.position = "none")
+
+
+# average width per celltype, technology and class
+res %>%
+  unnest(sil) %>%
+  filter(celltype %in% c("HEK cells", "B cells", "CD14+ Monocytes")) %>%
+  group_by(technology, class, celltype) %>% 
+  summarise(avg_width = mean(avg_width)) %>%
+  ungroup() %>%
+  ggplot(aes(x=celltype, y=avg_width, fill=celltype)) +
+  geom_col() +
+  facet_wrap(~technology+class) +
+  my_theme()
+
+res %>% 
+  unnest(sil) %>%
+  filter(celltype != "unclassified") %>%
+  group_by(technology, class, celltype) %>% 
+  summarise(avg_width = mean(avg_width)) %>%
+  ungroup() %>%
+  ggplot(aes(x=class, y=avg_width, fill=celltype)) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  geom_violin() +
+  geom_jitter(height = 0, width = 0.1, alpha=.5) +
+  facet_wrap(~celltype, ncol=7) +
+  coord_flip() +
+  my_theme() +
+  theme(legend.position = "none")
+
+# umap plots
+res %>% 
+  filter(!class %in% c("most_var_raw_expr", "most_var_normalized_expr", "raw_expression")) %>%
+  filter(technology == "Quartz-Seq2") %>%
+  unnest(coords) %>%
+  group_by(technology, class, cell, nnet2) %>%
+  summarise(`1`=mean(`1`),
+            `2`=mean(`2`)) %>%
+  ungroup() %>%
+  ggplot(aes(x=`1`, y=`2`, color=nnet2)) +
+  geom_point() +
+  theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank()) +
+  my_theme() +
+  #scale_colour_discrete(drop=FALSE) +
+  facet_wrap(~class, scales="free")
+
+# silhouette visulization
+x = readRDS("output/hca_data/cluster_results.rds") %>%
+  filter(class == "normalized_expression" & technology == "Quartz-Seq2")
+
+x %>%
+  unnest(coords) %>%
+  ggplot(aes(x=`1`, y=`2`, color=nnet2)) +
+  geom_point() +
+  theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank()) +
+  my_theme() +
+  #scale_colour_discrete(drop=FALSE) +
+  facet_wrap(~technology+class, scales="free")
+
+x %>% unnest(sil) %>% slice(1) %>% pull(obj) %>% pluck(1) %>% plot()
+
+```
+#### Correlation of silhouette results with libsize and number of non-zero-genes
+```{r "correlation of silhouette results with libsize and number of non-zero-genes}
+res = readRDS("output/hca_data/cluster_results.rds") %>%
+  unnest(sil) %>%
+  filter(class == "progeny100") %>%
+  distinct(technology, mean_avg_width)
+
+count_mat = readRDS("output/hca_data/expression_all_13_technologies.rds")
+emat = count_mat[1,2] %>% pluck(1,1)
+non_zero_genes_df = count_mat %>%
+  transmute(technology, median_non_zero_genes = emat %>% map(function(emat) {
+    emat %>% 
+      summary() %>%
+      as_tibble() %>%
+      dplyr::rename(cell=j) %>%
+      dplyr::count(cell) %>%
+      summarise(median_non_zero_genes = median(n),
+                mean_non_zero_genes = mean(n))
+  })) %>%
+  unnest()
+
+libsize_df = count_mat %>%
+  transmute(technology, x = emat %>% map(function(emat) {
+    emat %>% 
+      as.matrix() %>% 
+      colSums() %>% 
+      enframe("cell", "libsize") %>%
+      summarise(median_libsize = median(libsize),
+                mean_libsize = mean(libsize))
+  })) %>%
+  unnest()
+
+left_join(res, non_zero_genes_df) %>%
+  left_join(libsize_df) %>%
+  # ggplot(aes(x=mean_non_zero_genes, y=mean_avg_width)) +
+  ggplot(aes(x=mean_libsize, y=mean_avg_width)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  my_theme()
+```
+
+### All technologies
+```{r "all technologies}
+sce = get(load("data/hca_data/expression_data/sce.all.technologies.RData"))
+
+emat = assay(sce) %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+
+meta = colData(sce) %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("cell") %>%
+  as_tibble() %>%
+  dplyr::rename(technology = batch) %>%
+  mutate(technology = as_factor(technology))
+
+expr = meta %>% 
+  separate(cell, into = c("id"), remove = F) %>%
+  distinct(id, technology) %>%
+  select(technology, id) %>%
+  nest(-technology, .key="id") %>%
+  transmute(technology, emat = id %>% map(function(i) {
+    emat %>% 
+      select(contains(pull(i, id))) %>%
+      as.matrix() %>%
+      Matrix(sparse=T)
+  }))
+
+saveRDS(expr, "output/hca_data/expression_all_13_technologies.rds")
+saveRDS(meta, "output/hca_data/meta_df.rds")
+```
+
+
+```{r "vblalb}
+full_join(df1, df2, by = 'key') %>% 
+    mutate(
+        var1 = coalesce(var1.x, var1.y), 
+        var2 = coalesce(var2.x, var2.y)
+    ) %>% 
+    select(key, var1, var2, var3, var4)
+```
