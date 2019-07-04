@@ -1,0 +1,1396 @@
+---
+title: "figure_arrangement"
+author: "Christian Holland"
+date: "6/23/2019"
+output: html_document
+---
+
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(ggrepel)
+library(tidylog)
+library(myutils)
+library(pheatmap)
+library(RColorBrewer)
+library(ggplotify)
+library(grid)
+library(ggdendro)
+
+options("tidylog.display" = list(print))
+theme_set(theme_cowplot())
+source("src/my_ggplot_themes.R")
+
+```
+### Genereal robustness
+#### PROGENy
+##### ROC and PR curves
+```{r}
+progeny_performance_global = readRDS("output/full_progeny_matrix/progeny_scores_with_varying_dropouts_footprints.rds") %>%
+    mutate(dropin = fct_recode(dropin, All = "all"),
+           footprints = fct_recode(footprints, All = "all"))
+
+# gene coverage vs mean auroc for various number of footprints
+gene_cov_vs_auroc_all_footprints = progeny_performance_global %>% 
+  unnest(roc) %>%
+  group_by(dropin, footprints) %>%
+  summarise(mean_auc = mean(auc), 
+            sd_auc = sd(auc)) %>%
+  ggplot(aes(x=dropin, y=mean_auc, group=footprints, color=footprints)) +
+  geom_point(size=3) +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean_auc + sd_auc, ymin = mean_auc - sd_auc, width=0.5), alpha=.4) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(x="Gene coverage", y="AUROC", color = "# Footprint genes per pathway") + 
+  background_grid(major = "xy", minor = "none", size.major = 0.4) +
+  theme(legend.position = c(0.1,0.25),
+        title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14)) +
+  guides(color = guide_legend(ncol = 3)) +
+  scale_color_manual(values = rwth_color(c("turquoise", "maygreen",
+                                           "orange","magenta", "yellow", 
+                                           "blue"))) 
+
+saveRDS(gene_cov_vs_auroc_all_footprints, "fig/general_robustness/progeny/gene_cov_vs_auroc_all_footprints.rds")
+
+# correlation of auroc and auprc
+
+auroc = progeny_performance_global %>%
+  unnest(roc) %>%
+  group_by(dropin, footprints) %>%
+  summarise(mean_auroc = mean(auc),
+            sd_auroc = sd(auc)) %>%
+  ungroup()
+
+auprc = progeny_performance_global %>%
+  unnest(pr) %>%
+  group_by(dropin, footprints) %>%
+  summarise(mean_auprc = mean(auc),
+            sd_auprc = sd(auc)) %>%
+  ungroup()
+
+auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "footprints")) %>%
+  filter(footprints == 300) %>%
+  ggplot(aes(x=mean_auroc, y=mean_auprc, label=dropin)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auroc - sd_auroc,
+                    xmax = mean_auroc + sd_auroc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = mean_auprc - sd_auprc,
+                    ymax = mean_auprc + sd_auprc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5) +
+  labs(x = "AUROC", y="AUPRC") +
+  my_theme()
+
+saveRDS(auroc_vs_auprc, "fig/general_robustness/progeny/auroc_vs_auprc.rds")
+```
+
+#### DoRothEA
+##### ROC and PR curves
+```{r}
+dorothea_performance_global = readRDS("output/benchmark/dorothea_performance.rds") %>%
+    mutate(dropin = fct_recode(dropin, All = "all"))
+
+# roc curve
+gene_cov_vs_auroc = dorothea_performance_global %>%
+  unnest(roc) %>%
+  distinct(organism, dropin, auc) %>%
+  ggplot(aes(x=dropin, y=auc, fill=dropin)) +
+  geom_jitter(aes(color=dropin), alpha=.6, size=3) +
+  geom_violin(aes(color=dropin), fill="white") +
+  my_theme() +
+  theme(legend.position = "none") +
+  geom_hline(yintercept = 0.5, lty=2) + 
+  labs(x = "Gene coverage", y="AUROC") +
+  scale_color_manual(values = rwth_color(c("blue", "purple", "violet", "bordeaux", 
+                                           "orange", "green", "turquoise", 
+                                           "petrol"))) +
+  scale_fill_manual(values = rwth_color(c("blue", "purple","violet", "bordeaux", 
+                                          "orange", "green", "turquoise", 
+                                          "petrol")))
+
+saveRDS(gene_cov_vs_auroc, "fig/general_robustness/dorothea/gene_cov_vs_auroc.rds")
+
+# auroc auprc correation
+auroc = dorothea_performance_global %>%
+  unnest(roc) %>%
+  group_by(dropin) %>%
+  summarise(mean_auroc = mean(auc),
+            sd_auroc = sd(auc)) %>%
+  ungroup()
+
+auprc = dorothea_performance_global %>%
+  unnest(pr) %>%
+  group_by(dropin) %>%
+  summarise(mean_auprc = mean(auc),
+            sd_auprc = sd(auc)) %>%
+  ungroup()
+
+auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin")) %>%
+  ggplot(aes(x=mean_auroc, y=mean_auprc, label=dropin)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auroc - sd_auroc,
+                    xmax = mean_auroc + sd_auroc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = mean_auprc - sd_auprc,
+                    ymax = mean_auprc + sd_auprc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5) +
+  labs(x = "AUROC", y="AUPRC") +
+  my_theme()
+
+saveRDS(auroc_vs_auprc, "fig/general_robustness/dorothea/auroc_vs_auprc.rds")
+
+
+```
+
+### In silico benchmark
+#### Count distribution of real and simulated single cell
+```{r}
+meta = readRDS("output/scRNAseq_techniques/meta_df.rds") %>%
+  filter(technology == "Quartz-Seq2" & nnet2 == "HEK cells")
+real = readRDS("output/scRNAseq_techniques/expression_all_13_technologies.rds") %>%
+  filter(technology == "Quartz-Seq2") %>%
+  pluck(2,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene) %>%
+  semi_join(meta)
+
+most_var_gene_real = real %>% 
+  group_by(gene) %>% 
+  summarise(real_variance = var(count)) %>% 
+  ungroup() %>% 
+  arrange(-real_variance)
+
+meta_sim = readRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds") %>%
+  filter(id == "archs:0031" & num_cells == 100) %>%
+  filter(group == "control")
+sim = readRDS("output/in_silico_benchmark/simulation/dorothea/raw_counts/sc_raw_counts_100_10000_1.rds") %>%
+  filter(id == "archs:0031") %>%
+  pluck(7,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene)  %>%
+  semi_join(meta_sim)
+
+# find most variable gene
+most_var_gene_sim = sim %>% 
+  group_by(gene) %>% 
+  summarise(sim_variance = var(count)) %>% 
+  ungroup() %>% 
+  arrange(-sim_variance)
+
+v = inner_join(most_var_gene_sim, most_var_gene_real) %>%
+  filter(sim_variance != 0) %>%
+  filter(between(sim_variance,0.25,0.5)) %>%
+  filter(real_variance != 0) %>%
+  filter(between(real_variance,0.25,0.5)) %>%
+  mutate(diff = abs(sim_variance - real_variance)) %>%
+  filter(diff != 0) %>%
+  arrange(diff)
+
+real_distr = real %>%
+  # DTX3
+  # filter(gene == "ZBTB14") %>%
+  filter(gene == "WDR53") %>%
+  ggplot(aes(x=log10(count+1), fill="1")) +
+  geom_density() +
+  my_theme() +
+  labs(x="log10(Count + 1)", y="Density") +
+  ylim(0,11) +
+  xlim(0,0.6) +
+  scale_fill_manual(values = rwth_color("red")) +
+  theme(legend.position = "none")
+
+sim_distr = sim %>%
+  filter(gene == "ZBTB14") %>%
+  ggplot(aes(x=log10(count+1), fill="1")) +
+  geom_density() +
+  my_theme() +
+  labs(x="log10(Count + 1)", y="Density") +
+  ylim(0,11) +
+  xlim(0, 0.6) +
+  scale_fill_manual(values = rwth_color("blue")) +
+  theme(legend.position = "none")
+
+saveRDS(real_distr, "fig/in_silico_benchmark/real_count_distribution.rds")
+saveRDS(sim_distr, "fig/in_silico_benchmark/sim_count_distribution.rds")
+```
+#### Mean vs variance
+```{r}
+meta = readRDS("output/scRNAseq_techniques/meta_df.rds") %>%
+  filter(technology == "Quartz-Seq2" & nnet2 == "HEK cells")
+norm = readRDS("output/scRNAseq_techniques/norm_expression_all_13_technologies.rds") %>%
+  filter(technology == "Quartz-Seq2") %>%
+  pluck(2,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene) %>%
+  semi_join(meta, by="cell")
+
+meta_sim = readRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds") %>%
+  filter(id == "archs:0031" & num_cells == 100) %>%
+  filter(group == "control")
+
+sim_norm = readRDS("output/in_silico_benchmark/simulation/dorothea/norm_expression/sc_norm_expression_100_10000_1.rds") %>%
+  filter(id == "archs:0031") %>%
+  pluck(7,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene) %>%
+  semi_join(meta_sim, by="cell")
+
+mean_vs_var_real = norm %>%
+  group_by(gene) %>%
+  summarise(m = mean(count), 
+            v = var(count)) %>%
+  ungroup() %>%
+  ggplot(aes(x=m,y=v, color="1")) +
+  geom_point(alpha=0.3) +
+  labs(x="Mean of normalized counts", y="Variance") +
+  my_theme() +
+  scale_color_manual(values = rwth_color("red")) +
+  theme(legend.position = "none") +
+  xlim(0,8) +
+  ylim(0,3)
+
+mean_vs_var_sim = sim_norm %>%
+  group_by(gene) %>%
+  summarise(m = mean(count), 
+            v = var(count)) %>%
+  ungroup() %>%
+  ggplot(aes(x=m,y=v, color="1")) +
+  geom_point(alpha=0.3) +
+  labs(x="Mean of normalized counts", y="Variance") +
+  my_theme() +
+  scale_color_manual(values = rwth_color("blue")) +
+  theme(legend.position = "none") +
+  xlim(0,8) +
+  ylim(0,3)
+
+saveRDS(mean_vs_var_real, "fig/in_silico_benchmark/real_mean_vs_var.rds")
+saveRDS(mean_vs_var_sim, "fig/in_silico_benchmark/sim_mean_vs_var.rds")
+```
+#### Library vs number detected genes
+```{r}
+meta = readRDS("output/scRNAseq_techniques/meta_df.rds") %>%
+  # filter(technology == "Quartz-Seq2" & nnet2 == "HEK cells") 
+  filter(technology == "CEL-Seq2" & nnet2 == "HEK cells")
+
+raw = readRDS("output/scRNAseq_techniques/expression_all_13_technologies.rds") %>%
+  # filter(technology == "Quartz-Seq2") %>%
+  filter(technology == "CEL-Seq2") %>%
+  pluck(2,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene) %>%
+  semi_join(meta, by="cell")
+
+meta_sim = readRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds") %>%
+  filter(id == "archs:0031" & num_cells == 100) %>%
+  filter(group == "control")
+
+sim_raw = readRDS("output/in_silico_benchmark/simulation/dorothea/raw_counts/sc_raw_counts_100_10000_1.rds") %>%
+  filter(id == "archs:0031") %>%
+  pluck(7,1) %>%
+  as.matrix() %>%
+  data.frame(check.names = F, stringsAsFactors = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble() %>%
+  gather(cell, count, -gene) %>%
+  semi_join(meta_sim, by="cell")
+
+
+l_real = raw %>% 
+  filter(count != 0) %>%
+  group_by(cell) %>%
+  summarise(libsize = sum(count),
+            num = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=libsize, y=num, color="1")) +
+  geom_point(alpha=.5) +
+  labs(x = "Library size", y="# detected genes") +
+  my_theme() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = rwth_color("red"))
+
+l_sim = sim_raw %>% 
+  filter(count != 0) %>%
+  group_by(cell) %>%
+  summarise(libsize = sum(count),
+            num = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=libsize, y=num, color="1")) +
+  geom_point(alpha = 0.5) +
+  labs(x = "Library size", y="# detected genes") +
+  my_theme() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = rwth_color("blue"))
+
+saveRDS(l_real, "fig/in_silico_benchmark/real_lib_vs_cov.rds")
+saveRDS(l_sim, "fig/in_silico_benchmark/sim_lib_vs_cov.rds")
+```
+
+
+#### DoRothEA/VIPER
+##### ROC Curve
+```{r "roc curve"}
+df = list.files("output/in_silico_benchmark/simulation/dorothea/performance/", 
+                full.names = T, pattern = "roc_curve") %>%
+  map_df(function(path) {
+    readRDS(path) %>%
+      filter(confidence == "A" & group == "multi_conf")
+  })
+roc_curve = df %>% 
+  arrange(desc(type)) %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(type = fct_inorder(type)) %>%
+  # filter(run %in% c(4) | type == "bulk_sample") %>%
+  ggplot(aes(x=1-specificity, y=sensitivity, group = run, color=type, alpha = type)) +
+  geom_path(aes(size=type)) +
+  geom_abline(linetype = "dashed") +
+  my_theme() +
+  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_alpha_manual(values = c(0.25,1)) +
+  scale_size_manual(values = c(1,1.5)) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+  
+
+saveRDS(roc_curve, "fig/in_silico_benchmark/dorothea/roc_curve.rds") 
+```
+
+##### AUROC vs coverage
+```{r, "auroc vs coverage}
+performance_result = readRDS("output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, confidence, group, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+
+auroc_vs_cov = performance_result %>%
+  filter(metric == "roc_auc") %>%
+  filter(group == "multi_conf") %>%
+  filter(type == "Bulk" | (libsize == 5000 & num_cells == 10)) %>%
+  ggplot(aes(x=mean_auc,y=coverage, color=type, label=confidence)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auc - sd_auc,
+                    xmax = mean_auc + sd_auc, height=0), 
+                 show.legend = F) +
+  geom_vline(aes(xintercept = random), linetype="dashed") +
+  geom_label_repel(size=5, show.legend = F) +
+  labs(x="AUROC", y="Coverage (# unique TFs)") +
+  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  theme(legend.position = "top") +
+  my_theme()
+
+saveRDS(auroc_vs_cov, "fig/in_silico_benchmark/dorothea/auroc_vs_cov.rds") 
+```
+##### AUROC vs AUPRC
+```{r, "auroc vs auprc}
+performance_result = readRDS("output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, confidence, group, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+auroc_vs_auprc = performance_result %>%
+  select(-random) %>%
+  filter(group == "multi_conf") %>%
+  filter(type == "Bulk" | (libsize == 5000 & num_cells == 10)) %>%
+  gather(key, value, mean_auc, sd_auc) %>%
+  unite(new_key, metric, key, sep="_") %>%
+  spread(new_key, value) %>%
+  ggplot(aes(x=roc_auc_mean_auc, y=pr_auc_mean_auc, label=confidence, 
+             color=type, group = type)) +
+  # geom_line(stat = "smooth", method = "lm", alpha=0.4, size=2, 
+  #           show.legend = F) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = roc_auc_mean_auc - roc_auc_sd_auc,
+                    xmax = roc_auc_mean_auc + roc_auc_sd_auc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = pr_auc_mean_auc - pr_auc_sd_auc,
+                    ymax = pr_auc_mean_auc + pr_auc_sd_auc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5, show.legend = F) +
+  labs(x="AUROC", y="AUPRC") +
+  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  theme(legend.position = "top") +
+  ylim(-0.003,NA) +
+  my_theme()
+
+saveRDS(auroc_vs_auprc, "fig/in_silico_benchmark/dorothea/auroc_vs_auprc.rds")
+```
+##### Distance heatmap summarized across all confidence levels
+```{r "distance heatmap summarized across all confidence levels"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, confidence, group, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+
+bulk = performance_result %>%
+  filter(type == "Bulk") %>%
+  filter(group == "multi_conf" & metric == "roc_auc") %>%
+  select(confidence, bulk_auc = mean_auc)
+
+input = performance_result %>%
+  filter(type == "Single cells") %>%
+  filter(group == "multi_conf" & metric == "roc_auc") %>%
+  select(libsize, num_cells, confidence, mean_auc) %>%
+  inner_join(bulk, by="confidence") %>%
+  mutate(d = (mean_auc - bulk_auc)) %>%
+  group_by(libsize, num_cells, confidence) %>%
+  summarise(d = mean(d)) %>%
+  ungroup() %>%
+  # filter(confidence == "AB") %>%
+  select(confidence, libsize, num_cells, d) %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells)) %>%
+  mutate(highlight = case_when((libsize == 5000 & num_cells == 10) ~ "yes",
+                               TRUE ~ NA_character_))
+
+text_df = performance_result %>%
+  filter(type == "Single cells") %>%
+  filter(group == "multi_conf" & metric == "roc_auc") %>%
+  select(libsize, num_cells, confidence, mean_auc) %>%
+  group_by(libsize, num_cells) %>%
+  dplyr::slice(which.max(mean_auc)) %>% 
+  ungroup() %>%
+  distinct(libsize, num_cells, label = confidence) %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells))
+  
+  
+auroc_distance_hmap = input %>%
+  ggplot(aes(x=num_cells, y=libsize)) +
+  geom_tile(aes(fill=d, color=highlight, width=0.99, height=0.99), size=1) +
+  theme(title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14),
+        # axis.text.x = element_text(angle = -90),
+        axis.line = element_blank(),
+        axis.ticks = element_blank())+
+  guides(fill = guide_colorbar("Distance"), color=F) +
+  labs(x="Number of single cells per bulk sample", 
+       y="Mean library size of single cell") +
+  scale_fill_gradient2(low = rwth_color("green"), 
+                       mid = "white", 
+                       high = rwth_color("orange")) +
+  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+  geom_text(data = text_df, aes(label = label), size=4, angle=0)
+
+saveRDS(auroc_distance_hmap, 
+        "fig/in_silico_benchmark/dorothea/auroc_distance_hmap.rds")
+```
+##### Variation across multiple runs
+```{r "variation across multiple runs"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds") %>%
+  unnest()
+# how much variance do we have within the repetitions
+run_variance = performance_result %>%
+  filter(type == "single_cells" & confidence == "AB" & metric == "roc_auc") %>%
+  distinct(libsize, num_cells, reps, run, auc) %>%
+  ggplot(aes(x=fct_reorder(interaction(libsize, num_cells, sep = "_"), auc), y=auc)) +
+  geom_jitter(alpha=0.3) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(x = "Parameter combinations", y = "AUROC") +
+  stat_summary(fun.y=median, geom="line", aes(group = 1), 
+               color=rwth_color("blue")) +
+  my_theme()
+
+saveRDS(run_variance, 
+        "fig/in_silico_benchmark/dorothea/run_variance.rds")
+```
+
+##### Benchmark data overview
+```{r "benchmark data overview"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, confidence, group, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+
+# tf coverage and number of positive cases
+benchmark_data = performance_result %>%
+  filter(group == "single_conf") %>%
+  distinct(confidence, coverage, positive) %>%
+  dplyr::rename(Coverage = coverage, "Experiment" = positive) %>%
+  gather(key, value, -confidence) %>%
+  ggplot(aes(x=key, y=value, fill=confidence)) +
+  geom_col() +
+  my_theme() +
+  labs(x = NULL, y="Count") +
+  scale_fill_manual(values = rwth_color(c("green", "green75", "green50", 
+                                          "green25", "green10"))) +
+  theme(legend.position = "top")
+
+saveRDS(benchmark_data, 
+        "fig/in_silico_benchmark/dorothea/benchmark_data.rds")
+```
+
+#### PROGENy
+##### ROC Curve
+```{r "roc curve"}
+df = list.files("output/in_silico_benchmark/simulation/progeny/performance", 
+                full.names = T, pattern = "roc_curve") %>%
+  map_df(function(path) {
+    if (str_detect(path, "10_5000") | str_detect(path, "bulk")) {
+      readRDS(path) %>%
+        filter(footprints == "100") 
+    }
+  })
+roc_curve = df %>% 
+  arrange(desc(type)) %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(type = fct_inorder(type)) %>%
+  # filter(run %in% c(4) | type == "bulk_sample") %>%
+  ggplot(aes(x=1-specificity, y=sensitivity, group = run, color=type, alpha = type)) +
+  geom_path(aes(size=type)) +
+  geom_abline(linetype = "dashed") +
+  my_theme() +
+  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_alpha_manual(values = c(0.25,1)) +
+  scale_size_manual(values = c(1,1.5)) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+  
+
+saveRDS(roc_curve, "fig/in_silico_benchmark/progeny/roc_curve.rds") 
+```
+##### AUROC vs number of footprints
+```{r "auroc vs number of footprints"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, footprints, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(footprints = fct_recode(footprints, All = "all"))
+
+auroc_vs_footprints = performance_result %>%
+  filter(metric == "roc_auc") %>%
+  filter(type == "Bulk" | (libsize == 5000 & num_cells == 10)) %>% 
+  ggplot(aes(x=mean_auc,y=footprints, color=type, group = type, label=footprints)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auc - sd_auc,
+                    xmax = mean_auc + sd_auc, height=0), 
+                 show.legend = F) +
+  #theme(legend.position = "none") +
+  geom_vline(aes(xintercept = random), linetype="dashed") +
+  labs(x="AUROC", y="# footprints/genes per pathway") +
+  # geom_smooth(method = "lm", se = F, show.legend = F) +
+  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  theme(legend.position = "top") +
+  my_theme()
+
+saveRDS(auroc_vs_footprints, 
+        "fig/in_silico_benchmark/progeny/auroc_vs_footprints.rds")
+```
+##### AUROC vs AUPRC
+```{r "auroc vs auprc"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, footprints, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(footprints = fct_recode(footprints, All = "all"))
+
+auroc_vs_auprc =performance_result %>%
+  select(-random) %>%
+  filter(type == "Bulk" | (libsize == 5000 & num_cells == 10)) %>%
+  gather(key, value, mean_auc, sd_auc) %>%
+  unite(new_key, metric, key, sep="_") %>%
+  spread(new_key, value) %>%
+  ggplot(aes(x=roc_auc_mean_auc, y=pr_auc_mean_auc, label=footprints, 
+             color=type, group = type)) +
+  # geom_line(stat = "smooth", method = "lm", alpha=0.4, size=2, 
+  #           show.legend = F) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = roc_auc_mean_auc - roc_auc_sd_auc,
+                    xmax = roc_auc_mean_auc + roc_auc_sd_auc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = pr_auc_mean_auc - pr_auc_sd_auc,
+                    ymax = pr_auc_mean_auc + pr_auc_sd_auc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5, show.legend = F) +
+  labs(x="AUROC", y="AUPRC") +
+  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  theme(legend.position = "top") +
+  my_theme()
+
+saveRDS(auroc_vs_auprc, 
+        "fig/in_silico_benchmark/progeny/auroc_vs_auprc.rds")
+```
+##### Distance heatmap summarized across different footprint numbers
+```{r "distance heatmap summarized across different footprint numbers"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, footprints, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(footprints = fct_recode(footprints, All = "all"))
+
+bulk = performance_result %>%
+  filter(type == "Bulk") %>%
+  filter(metric == "roc_auc") %>%
+  select(footprints, bulk_auc = mean_auc)
+
+input = performance_result %>%
+  filter(type == "Single cells") %>%
+  filter(metric == "roc_auc") %>%
+  select(libsize, num_cells, footprints, mean_auc) %>%
+  inner_join(bulk, by="footprints") %>%
+  mutate(d = (mean_auc - bulk_auc)) %>%
+  group_by(libsize, num_cells, footprints) %>%
+  summarise(d = mean(d)) %>%
+  ungroup() %>%
+  # filter(footprints == "300") %>%
+  select(footprints, libsize, num_cells, d) %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells)) %>%
+  mutate(highlight = case_when((libsize == 5000 & num_cells == 10) ~ "yes",
+                               TRUE ~ NA_character_))
+
+text_df = performance_result %>%
+  filter(type == "Single cells") %>%
+  filter(metric == "roc_auc") %>%
+  select(libsize, num_cells, footprints, mean_auc) %>%
+  group_by(libsize, num_cells) %>%
+  dplyr::slice(which.max(mean_auc)) %>% 
+  ungroup() %>%
+  distinct(libsize, num_cells, label = footprints) %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells))
+
+auroc_distance_hmap = input %>%
+  ggplot(aes(x=num_cells, y=libsize)) +
+  geom_tile(aes(fill=d, color=highlight, width=0.99, height=0.99), size=1) +
+  theme(title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14),
+        # axis.text.x = element_text(angle = -90),
+        axis.line = element_blank(),
+        axis.ticks = element_blank()
+        ) +
+  guides(fill = guide_colorbar("Distance"), color=F) +
+  labs(x="Number of single cells per bulk sample", 
+       y="Mean library size of single cell") +
+  scale_fill_gradient2(low = rwth_color("green"), 
+                       mid = "white", 
+                       high = rwth_color("orange")) +
+  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+  geom_text(data = text_df, aes(label = label), size=4, angle=90)
+
+saveRDS(auroc_distance_hmap, 
+        "fig/in_silico_benchmark/progeny/auroc_distance_hmap.rds")
+```
+##### Variation across multiple runs
+```{r "variation across multiple runs"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds") %>%
+  unnest()
+# how much variance do we have within the repetitions
+run_variance = performance_result %>%
+  filter(type == "single_cells" & footprints == 300 & metric == "roc_auc") %>%
+  distinct(libsize, num_cells, reps, run, auc) %>%
+  ggplot(aes(x=fct_reorder(interaction(libsize, num_cells, sep = "_"), auc), y=auc)) +
+  geom_jitter(alpha=0.3) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(x = "Parameter combinations", y = "AUROC") +
+  stat_summary(fun.y=median, geom="line", aes(group = 1), 
+               color=rwth_color("blue")) +
+  my_theme()
+
+saveRDS(run_variance, 
+        "fig/in_silico_benchmark/progeny/run_variance.rds")
+
+```
+##### Benchmark data overview
+```{r "benchmark data overview"}
+performance_result = readRDS("output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds") %>%
+  unnest() %>%
+  group_by(libsize, num_cells, type, footprints, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+
+# tf coverage and number of positive cases
+benchmark_data = performance_result %>%
+  distinct(coverage, positive) %>%
+  dplyr::rename(Coverage = coverage, "Experiment" = positive) %>%
+  gather(key, value) %>%
+  ggplot(aes(x=key, y=value, fill="bla")) +
+  geom_col() +
+  my_theme() +
+  labs(x = NULL, y="Count") +
+  theme(legend.position = "top") %>%
+  scale_fill_manual(values = rwth_color("green")) +
+  theme(legend.position = "none")
+
+saveRDS(benchmark_data, 
+        "fig/in_silico_benchmark/progeny/benchmark_data.rds")
+```
+### In vitro benchmark
+
+#### DoRothEA/VIPER
+##### Individual performance of all benchmark datasets
+```{r}
+performance_result= readRDS("output/in_vitro_benchmark/performance_result.rds") %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+roc_vs_cov_ind = performance_result %>%
+  filter(metric == "roc_auc") %>%
+  filter(type == "individual") %>%
+  ggplot(aes(x=auc, y=coverage, color=interaction(class), label=confidence)) +
+  geom_point(size=3) +
+  geom_path(size=1) +
+  geom_vline(xintercept = 0.5, linetype="dashed") +
+  facet_wrap(~class, scales="free_y") +
+  geom_label_repel(size=5) +
+  theme(legend.position = "none") +
+  my_theme() +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  labs(x="AUROC", y="Coverage (# unique perturbed TFs)")
+
+saveRDS(roc_vs_cov_ind, "fig/in_vitro_benchmark/roc_vs_cov_ind.rds")
+
+roc_vs_pr_ind = performance_result %>%
+  filter(type == "individual") %>%
+  select(confidence, series, day,class, metric, auc, type) %>%
+  spread(metric, auc) %>%
+  ggplot(aes(roc_auc, pr_auc, label=confidence, color=class)) +
+  geom_point(size=3) +
+  # geom_vline(xintercept = 0.5, linetype = "dashed") +
+  facet_wrap(~class, scales = "free_y") +
+  geom_smooth(method = "lm", alpha=0.2) +
+  geom_label_repel(size=5) +
+  my_theme() +
+  labs(x="AUROC", y="AUPRC") +
+  theme(legend.position = "none") +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green")))
+
+saveRDS(roc_vs_pr_ind, "fig/in_vitro_benchmark/roc_vs_pr_ind.rds")
+```
+
+##### Summarized performance
+```{r}
+performance_result= readRDS("output/in_vitro_benchmark/performance_result.rds")
+
+roc_vs_cov_sub = performance_result %>%
+  filter(metric == "roc_auc") %>%
+  filter(type == "sub") %>%
+  ggplot(aes(x=auc, y=coverage, label=confidence)) +
+  geom_point(size=3) +
+  geom_path(size=1) +
+  geom_vline(xintercept = 0.5, linetype="dashed") +
+  geom_label_repel(size=5) +
+  theme(legend.position = "none") +
+  my_theme() +
+  labs(x="AUROC", y="Coverage (# unique perturbed TFs)")
+
+saveRDS(roc_vs_cov_sub, "fig/in_vitro_benchmark/roc_vs_cov_sub.rds")
+
+roc_vs_pr_sub = performance_result %>%
+  filter(type == "sub") %>%
+  select(confidence, metric, auc, type) %>%
+  spread(metric, auc) %>%
+  ggplot(aes(roc_auc, pr_auc, label=confidence)) +
+  geom_point(size=3) +
+  # geom_vline(xintercept = 0.5, linetype = "dashed") +
+  # geom_smooth(method = "lm", alpha=0.2) +
+  geom_label_repel(size=5) +
+  my_theme() +
+  labs(x="AUROC", y="AUPRC") +
+  theme(legend.position = "none")
+
+saveRDS(roc_vs_pr_sub, "fig/in_vitro_benchmark/roc_vs_pr_sub.rds")
+```
+##### ROC curves
+```{r "roc curves"}
+roc_coords = readRDS("output/in_vitro_benchmark/roc_coords.rds") %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+roc_curves = roc_coords %>%
+  # to avoid that AB overlays A and ABCD(E) ABD - very ugly
+  filter(!(confidence %in% c("AB", "ABCD", "ABCDE") & 
+             class %in% c("Perturb-seq (7d)", "Perturb-seq (13d)"))) %>%
+  ggplot(aes(x=1-specificity, y=sensitivity, color=confidence)) +
+  geom_abline(linetype = "dashed") +
+  geom_path() +
+  facet_wrap(~class, scales="free") +
+  my_theme() +
+  theme(legend.position = "top") +
+  labs(x= "1-Specificity", y="Sensitivity") +
+  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange")))
+
+saveRDS(roc_curves, "fig/in_vitro_benchmark/roc_curves.rds")
+```
+##### PR curves
+```{r "pr curves"}
+meta= readRDS("output/in_vitro_benchmark/performance_result.rds") %>%
+  filter(metric == "pr_auc" & type == "individual") %>%
+  distinct(confidence, group, class, auc, metric, random)
+
+pr_coords = readRDS("output/in_vitro_benchmark/pr_coords.rds") %>%
+  # to avoid that AB overlays A and ABCD(E) ABD - very ugly
+  filter(!(confidence %in% c("AB", "ABCD", "ABCDE") & 
+             class %in% c("Perturb-seq (7d)", "Perturb-seq (13d)"))) %>%
+  left_join(meta) %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+pr_curves = pr_coords %>% 
+  # to avoid that AB overlays A and ABCD(E) ABD - very ugly
+  filter(!(confidence %in% c("AB", "ABCD", "ABCDE") & 
+             class %in% c("Perturb-seq (7d)", "Perturb-seq (13d)"))) %>%
+  ggplot(aes(x=recall, y=precision, color=confidence)) +
+  geom_hline(aes(yintercept = random, color=confidence), linetype = "dashed") +
+  geom_path() +
+  facet_wrap(~class, scales="free") +
+  my_theme() +
+  theme(legend.position = "top") +
+  labs(x= "Recall", y="Precision") +
+  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  theme(legend.position = "top")
+
+saveRDS(pr_curves, "fig/in_vitro_benchmark/pr_curves.rds")
+```
+
+##### Overview of benchmark
+```{r}
+dorothea = dorothea_regulon_human_v1 %>%
+  distinct(target = tf, confidence)
+gmatrix = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
+  left_join(dorothea, by="target") %>%
+  filter(!target %in% c("intergenic", "Scramble")) %>% 
+  distinct(class, target, confidence, rep) %>%
+  group_by(class, confidence) %>%
+  summarise(Coverage = n_distinct(target),
+            Experiment = n()) %>%
+  ungroup() %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+# tf coverage and number of positive cases
+benchmark_data = gmatrix %>%
+  gather(key, value, -class, -confidence) %>%
+  ggplot(aes(x=key, y=value, fill=confidence)) +
+  geom_col() +
+  my_theme() +
+  facet_wrap(~class) +
+  labs(x = NULL, y="Count") +
+  scale_fill_manual(values = rwth_color(c("green", "green75", "green50", 
+                                          "green25", "green10"))) +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle=45, hjust = 1))
+
+saveRDS(benchmark_data, 
+        "fig/in_vitro_benchmark/benchmark_data.rds")
+```
+
+##### Quality check of perturbation experiments
+```{r "quality check of perturbation experiments}
+limma_result = readRDS("output/in_vitro_benchmark/expr/limma_result.rds") %>%
+  arrange(class) %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+# quality check of perturbation experiment
+qc = limma_result %>%
+  unnest(limma_result) %>%
+  filter(gene == target) %>%
+  mutate(day = as_factor(day)) %>%
+  mutate(label = case_when(logFC >= 0 ~ contrast,
+                          TRUE ~ NA_character_)) %>%
+  ggplot(aes(x=fct_reorder(contrast, logFC), y= logFC, color=class, label=label)) +
+  geom_point() +
+  facet_wrap(~class, scales="free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none",
+        title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14)) +
+  my_theme() +
+  scale_x_discrete(breaks = NULL) +
+  labs(x = "Perturbation experiment/Contrast", y="logFC of perturbed gene/TF") +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green")))
+
+# numbers of interest
+limma_result %>%
+  unnest(limma_result) %>%
+  filter(gene == target) %>%
+  mutate(sign = sign(logFC)) %>%
+  count(class, sign)
+
+saveRDS(qc, "fig/in_vitro_benchmark/quality_check.rds")
+```
+
+##### Explore count distribution
+```{r "explore count data"}
+rel = readRDS("output/in_vitro_benchmark/expr/libsize_vs_non-zero-genes.rds") %>%
+  arrange(class) %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class))
+
+a = rel %>% 
+  unnest(rel) %>% 
+  add_count(class)
+
+b = a %>% 
+  group_by(class) %>%
+  summarise(x = mean(libsize)+10000,
+            y = 7000,
+            n = unique(n))
+
+libsize_num_cells = ggplot(a, aes(x=libsize, y=non_zero_genes, color=class)) +
+  geom_point(alpha=0.3) +
+  facet_wrap(~class) +
+  my_theme() +
+  geom_label(data = b, aes(x=x, y=y, label=n), size=5) +
+  theme(axis.text.x = element_text(angle=90, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Library size", y="#non-zero genes") +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green")))
+
+saveRDS(libsize_num_cells, "fig/in_vitro_benchmark/libsize_num_cells.rds")
+
+```
+
+##### Histogram of logFC
+```{r}
+limma_result = readRDS("output/in_vitro_benchmark/expr/limma_result.rds") %>%
+  arrange(class) %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class)) %>%
+  unnest(limma_result)
+
+h = limma_result %>%
+  ggplot(aes(x=logFC, fill=class)) +
+  geom_histogram(color="white", bins=30) +
+  facet_wrap(~class, scales="free") +
+  labs(x = "logFC", y = "Count") + 
+  my_theme() +
+  scale_fill_manual(values = rwth_color(c("blue", "red", "green"))) +
+  theme(legend.position = "none")
+
+saveRDS(h, "fig/in_vitro_benchmark/histogram_of_logfc.rds")
+```
+
+
+### Clustering analysis
+#### Dendrogram
+```{r "dendrogram"}
+a = list()
+a$merge <- matrix(c(-1,-2,
+                    -3,-4,
+                     1,-5,
+                     2,-6,
+                     3,-7,
+                     4,5,
+                     6,-8), nc=2, byrow=TRUE ) 
+a$height <- c(1,1,2,2,3,4,5)
+a$order <- 1:8
+a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes",
+              "NK cells","Dendritic cells","B cells",
+              "HEK cells")
+class(a) <- "hclust"
+
+dendro = ggdendrogram(a, theme_dendro = FALSE) +
+  labs(y = "Hierarchy level", x=NULL) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(angle = 0),
+        title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14)) +
+  geom_hline(yintercept = 2, linetype="dashed", color=rwth_color("red"))
+
+saveRDS(dendro, "fig/clustering_analysis/dendogram.rds")
+
+```
+
+#### PROGENy
+##### Silhouette correlation plot
+```{r "silhouette correlation plot"}
+cor = readRDS("output/scRNAseq_techniques/silhouette_correlation_wo_megak.rds") %>%
+  mutate(class = case_when(
+    class == "random_14_features" ~ "Neg. control",
+    class == "footprint_genes" ~ "Footprint expression",
+    class == "random_footprints" ~ "Neg. control",
+    class == "viperAB" ~ "TF activity (AB)",
+    class == "random_115_features" ~ "Neg. control",
+    class == "tf_genes" ~ "TF expression (AB)",
+    class == "progeny100" ~ "PROGENy (100)",
+    class == "progeny200" ~ "PROGENy (200)",
+    class == "progeny300" ~ "PROGENy (300)",
+    class == "progeny500" ~ "PROGENy (500)",
+    class == "progeny1000" ~ "PROGENy (1000)",
+    class == "progenyall" ~ "PROGENy (All)")) %>%
+  mutate(class = as_factor(class)) %>%
+  mutate(class = fct_shift(class, 6))
+
+ref = cor %>% 
+  filter(gg == "reference") %>%
+  spread(gg, m) %>%
+  select(-class, -tool)
+
+case = cor %>% 
+  filter(gg == "case") %>%
+  spread(gg, m)
+
+progeny_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "progeny")
+
+pfootprints_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "progeny_footprints")
+
+
+
+progeny_cor_plot = progeny_cor %>%  
+  filter(hrchy_level == "hrchy2") %>%
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") +
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red", "turquoise", "maygreen",
+                                           "orange","magenta", "yellow", 
+                                           "blue"))) +
+  guides(color = guide_legend(nrow=4))
+
+
+pfootprints_cor_plot = pfootprints_cor %>% 
+  filter(hrchy_level == "hrchy2") %>%
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red", "green")))
+  guides(color = guide_legend(nrow=1))
+  
+  
+saveRDS(progeny_cor_plot, "fig/clustering_analysis/progeny_cor_plot.rds")
+saveRDS(pfootprints_cor_plot, "fig/clustering_analysis/pfootprints_cor_plot.rds")
+
+progeny_cor_plot_all_hrchy = progeny_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") +
+  my_theme() +
+  facet_wrap(~hrchy_level,  ncol = 5) +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red", "turquoise", "maygreen",
+                                           "orange","magenta", "yellow", 
+                                           "blue"))) +
+  guides(color = guide_legend(nrow=2))
+
+
+pfootprints_cor_plot_all_hrchy = pfootprints_cor %>% 
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha = 0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  facet_wrap(~hrchy_level,  ncol = 5) +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red", "green"))) +
+  guides(color = guide_legend(nrow=1))
+  
+  
+saveRDS(progeny_cor_plot_all_hrchy, "fig/clustering_analysis/progeny_cor_plot_all_hrchy.rds")
+saveRDS(pfootprints_cor_plot_all_hrchy, "fig/clustering_analysis/pfootprints_cor_plot_all_hrchy.rds")
+```
+
+##### Celltype specific pathway scores
+```{r "celltype specific pathway scores"}
+df = readRDS("output/scRNAseq_techniques/summarized_footprints_scores.rds") %>%
+  filter(method == "progeny" & technology == "Quartz-Seq2" & footprints == "500") %>%
+  filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
+  select(-method, -s, -footprints) %>%
+  spread(feature, m) %>% 
+  select(-technology) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F) 
+
+paletteLength = 100
+myColor = colorRampPalette(c(rwth_color("orange"), "white", rwth_color("red")))(paletteLength)
+myBreaks = c(seq(min(df), 0, length.out=ceiling(paletteLength/2) + 1),
+             seq(max(df)/paletteLength, max(df), length.out=floor(paletteLength/2)))
+
+pw_celltype_hmap = pheatmap(df,fontsize=10, color=myColor, breaks = myBreaks) %>%
+  as.ggplot()
+
+saveRDS(pw_celltype_hmap, 
+        "fig/clustering_analysis/pw_celltype_hmap.rds")
+```
+#### DoRothEA/VIPER
+##### Silhouette correlation plot
+```{r "silhouette correlation plot"}
+cor = readRDS("output/scRNAseq_techniques/silhouette_correlation_wo_megak.rds") %>%
+  mutate(class = case_when(
+    class == "random_14_features" ~ "Neg. control",
+    class == "footprint_genes" ~ "Footprint expression",
+    class == "random_footprints" ~ "Neg. control",
+    class == "viperAB" ~ "TF activity (AB)",
+    class == "random_115_features" ~ "Neg. control",
+    class == "tf_genes" ~ "TF expression (AB)",
+    class == "progeny100" ~ "PROGENy (100)",
+    class == "progeny200" ~ "PROGENy (200)",
+    class == "progeny300" ~ "PROGENy (300)",
+    class == "progeny500" ~ "PROGENy (500)",
+    class == "progeny1000" ~ "PROGENy (1000)",
+    class == "progenyall" ~ "PROGENy (All)",
+    class == "most_var_normalized_expr" ~ "MVG (2500)")) %>%
+  mutate(class = as_factor(class)) %>%
+  mutate(class = fct_shift(class, 7))
+
+ref = cor %>% 
+  filter(gg == "reference") %>%
+  spread(gg, m) %>%
+  select(-class, -tool)
+
+case = cor %>% 
+  filter(gg == "case") %>%
+  spread(gg, m)
+
+dorothea_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "viper")
+
+dorothea_cor_plot = dorothea_cor %>%  
+  filter(hrchy_level == "hrchy2") %>%
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha=0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red", "purple", "petrol"))) +
+  guides(color = guide_legend(nrow=2))
+
+saveRDS(dorothea_cor_plot, "fig/clustering_analysis/dorothea_cor_plot.rds")
+
+dorothea_cor_plot_all_hrchy = dorothea_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha=0.5) +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  facet_wrap(~hrchy_level,  ncol = 5) +
+  scale_color_manual(values = rwth_color(c("red", "purple", "petrol"))) +
+  guides(color = guide_legend(nrow=1))
+
+saveRDS(dorothea_cor_plot_all_hrchy, 
+        "fig/clustering_analysis/dorothea_cor_plot_all_hrchy.rds")
+
+mvg_cor = case %>%
+  left_join(ref, by=c("technology", "hrchy_level")) %>%
+  filter(tool == "mvg")
+
+mvg_cor_plot = mvg_cor %>%  
+  filter(hrchy_level == "hrchy2") %>%
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha=0.5) +
+  #geom_text_repel() +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  scale_color_manual(values = rwth_color(c("red"))) +
+  guides(color = guide_legend(nrow=2))
+
+mvg_cor_plot_all_hrchy = mvg_cor %>%  
+  ggplot(aes(x=reference, y=case, col=class, group = class, label=technology)) +
+  geom_point(alpha=0.5) +
+  geom_abline(linetype = "dashed") +
+  geom_smooth(method = "lm", se = F) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  theme(legend.position = "top") + 
+  my_theme() +
+  labs(x="Silhouette score of gene expression", y = "Silhouette score of ...") +
+  facet_wrap(~hrchy_level,  ncol = 5) +
+  scale_color_manual(values = rwth_color(c("red"))) +
+  guides(color = guide_legend(nrow=1))
+```
+
+##### Celltype specific TF scores
+```{r "celltype specific tf scores"}
+df = readRDS("output/scRNAseq_techniques/summarized_footprints_scores.rds") %>%
+  filter(method == "dorothea" & technology == "Quartz-Seq2") %>%
+  filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
+  select(-method, -s, -footprints) %>%
+  spread(feature, m) %>% 
+  select(-technology) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F) 
+
+paletteLength = 100
+myColor = colorRampPalette(c(rwth_color("orange"), "white", rwth_color("red")))(paletteLength)
+myBreaks = c(seq(min(df), 0, length.out=ceiling(paletteLength/2) + 1),
+             seq(max(df)/paletteLength, max(df), length.out=floor(paletteLength/2)))
+
+tf_celltype_hmap = pheatmap(df,fontsize=10,fontsize_col = 5, color=myColor, breaks = myBreaks) %>%
+  as.ggplot()
+
+saveRDS(tf_celltype_hmap, 
+        "fig/clustering_analysis/tf_celltype_hmap.rds")
+```
+##### Example UMAP: Viper > norm expression
+```{r "example umap: viper > norm expression"}
+sil_res = readRDS("output/scRNAseq_techniques/silhouette_results_wo_megak.rds")
+viper_greater_norm = sil_res %>%
+  # filter(technology == "Drop-Seq") %>%
+  filter(technology == "inDrop") %>%
+  # filter(technology == "MARS-Seq") %>%
+  filter(class %in% c("normalized_expression", "viperAB")) %>%
+  mutate(class = case_when(class == "normalized_expression" ~ "Normalized expression",
+                           class == "viperAB" ~ "TF activities (AB)")) %>%
+  unnest(coords) %>%
+  ggplot(aes(x=x, y=y, color=hrchy2)) +
+  geom_point() +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.line = element_blank(),
+        axis.title = element_blank(),
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.position = "top") +
+  facet_wrap(~class, scales="free") +
+  scale_color_manual(values = rwth_color(c("orange", "bordeaux", "maygreen",  "turquoise")))
+
+saveRDS(viper_greater_norm, 
+        "fig/clustering_analysis/viper_greater_norm.rds")
+
+```
+
+
