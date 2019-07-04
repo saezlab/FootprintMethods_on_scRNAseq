@@ -1,0 +1,33 @@
+---
+title: "Variation of number of footprint genes"
+author: "Christian Holland"
+date: "05/11/2018"
+output: html_document
+---
+
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(tidyverse)
+```
+
+```{r "build full progeny matrix"}
+original = get(load("data/progeny_models/full_matrix/model_matrix.RData"))$assocs %>%
+  as_tibble()
+
+new_pws = read_csv("data/progeny_models/full_matrix/full_model2.csv") %>%
+  select(-X1) %>%
+  filter(pathway %in% c("Androgen", "Estrogen", "WNT"))
+
+full_matrix = bind_rows(original, new_pws)
+
+saveRDS(full_matrix, "data/progeny_models/full_matrix/full_progeny_matrix.rds")
+```
