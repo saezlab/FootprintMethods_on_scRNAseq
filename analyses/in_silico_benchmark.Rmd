@@ -390,7 +390,7 @@ param_combi = readRDS("output/in_silico_benchmark/simulation/paramter_combinatio
 
 # files required for the pipeline
 design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
-model = readRDS("data/full_progeny_matrix/full_progeny_matrix.rds")
+model = readRDS("data/progeny_models/full_matrix/full_progeny_matrix.rds")
 
 # filter based on top x genes
 # top 100 
@@ -545,7 +545,7 @@ basic_setup = tribble(
                                                     "AB", "ABC", "ABCD", 
                                                     "ABCDE")))
 
-performance = list.files("output/in_silico_benchmark/simulation/dorothea/viper_scores", full.names = T)[1:3] %>%
+performance = list.files("output/in_silico_benchmark/simulation/dorothea/viper_scores", full.names = T) %>%
   future_map_dfr(function(path) {
     df = readRDS(path) %>%
       unnest() %>%
