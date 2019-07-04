@@ -1,0 +1,199 @@
+---
+title: "progeny_dorothea_downsampling"
+author: "Christian Holland"
+date: "24/09/2018"
+output: html_document
+---
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(tidyverse)
+library(furrr)
+library(cowplot)
+library(viper)
+library(myutils)
+library(pROC)
+library(PRROC)
+library(biobroom)
+library(ggpubr)
+
+source("src/roc_curve_analysis.R")
+source("src/progeny_analysis.R")
+source("src/dorothea_analysis.R")
+source("src/my_ggplot_themes.R")
+
+plan(multiprocess)
+```
+### Utility functions
+```{r "utility functions"}
+mimic_dropout = function(df, dropin, reps, ...) {
+  if (dropin == "all") {
+    x = df %>%
+      mutate(run = 1) %>%
+      list()
+    return(x)
+  }
+  print(dropin)
+  map(1:reps, function(r) {
+    print(r)
+    df %>% 
+      group_by(id) %>%
+      sample_n(as.integer(dropin)) %>%
+      ungroup() %>%
+      mutate(run = r)
+  })
+}
+```
+### Introducing low coverage for each contrast independently
+#### PROGENy
+```{r "downsampled-progeny benchmark"}
+model = readRDS("data/progeny_models/full_matrix/full_progeny_matrix.rds")
+
+# filter based on top x genes
+# top 100 
+m_100 = model %>% group_by(pathway) %>% top_n(100, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# top 200 
+m_200 = model %>% group_by(pathway) %>% top_n(200, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# top 300 
+m_300 = model %>% group_by(pathway) %>% top_n(300, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# top 500 
+m_500 = model %>% group_by(pathway) %>% top_n(500, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# top 1000 
+m_1000 = model %>% group_by(pathway) %>% top_n(1000, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# all 
+m_all = model %>%
+  select(gene, pathway, weight=zscore) %>%
+  spread(pathway, weight, fill = 0) %>%
+  data.frame(row.names=1, check.names = F)
+
+# fiter based on p-value
+# distribution of p-values
+model %>% 
+  filter(pathway == "WNT") %>%
+  ggplot(aes(x=p.value)) +
+  geom_histogram() +
+  facet_wrap(~pathway)
+
+model %>% 
+  filter(p.value < 0.05) %>%
+  count(pathway)
+
+##
+expr = readRDS("data/general_robustness/progeny_benchmark_data.rds") %>%
+  filter(organism == "human") %>%
+  nest(-organism, .key="df")
+
+M = tribble(
+  ~organism, ~M, ~missing_value, ~footprints,
+  "human",  m_100, 0, 100,
+  "human",  m_200, 0, 200,
+  "human",  m_300, 0, 300,
+  "human",  m_500, 0, 500,
+  "human",  m_1000, 0, 1000,
+  "human", m_all, 0, "all"
+) %>%
+  mutate(footprints = as_factor(footprints))
+
+
+reps = 25
+dropins = c("all", "500", "1000", "2000", "3000", "5000", "7000", "8000")
+#dropins = c("all", "1000")
+
+design = tibble(dropin = dropins) %>%
+  mutate(organism = "human") %>%
+  inner_join(expr, by="organism") %>%
+  mutate(reps = reps) %>%
+  mutate(df = pmap(., .f=mimic_dropout)) %>%
+  unnest(df) %>%
+  inner_join(M, by="organism")
+
+# run progeny and measure performance globally
+progeny_performance_global = design %>%
+  mutate(activity = pmap(., .f = run_progeny)) %>%
+  select(-c(df, M, missing_value)) %>%
+  mutate(activity = activity %>% map(prepare_progeny_for_roc, filter_tn=T)) %>%
+  mutate(roc = activity %>% map(calc_roc_curve),
+         pr = activity %>% map(calc_pr_curve))
+
+progeny_performance_global = progeny_performance_global %>%
+  mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
+                                          2000, 1000, 500)))
+
+saveRDS(progeny_performance_global, "output/general_robustness/progeny_perforance.rds")
+```
+
+#### DoRothEA
+```{r "downsampled-dorothea benchmark"}
+expr = readRDS("data/general_robustness/dorothea_benchmark_data.rds") %>%
+  select(-c(z, logFC)) %>%
+  rename(expression = t) %>%
+  filter(organism == "human") %>%
+  nest(-organism, .key="df")
+
+human_regulon = dorothea_regulon_human_v1 %>%
+  filter(confidence %in% c("A", "B"))
+
+R = tribble(
+  ~organism, ~regulon, ~missing_value, ~qc, ~qc_th,
+  "human",  human_regulon, 0, F, 0
+)
+
+# design experiments
+reps = 25
+dropins = c("500", "1000", "2000","3000","5000", "7000", "8000", "all")
+#dropins = c("1000")
+
+design = tibble(dropin = dropins) %>%
+  mutate(organism = "human") %>%
+  inner_join(expr, by="organism") %>%
+  mutate(reps = reps) %>%
+  mutate(df = pmap(., .f=mimic_dropout)) %>%
+  unnest(df) %>%
+  inner_join(R, by="organism") 
+  
+
+# run dorothea and measure performance globally
+dorothea_performance_global = design %>%
+  mutate(activity = pmap(., .f = run_dorothea)) %>%
+  select(-c(df, regulon, missing_value)) %>%
+  mutate(activity = activity %>% map(prepare_dorothea_for_roc, 
+                                     filter_tn = T)) %>%
+  mutate(roc = activity %>% map(calc_roc_curve),
+         pr = activity %>% map(calc_pr_curve),
+         roc_obj = activity %>% map(get_roc_object))
+
+dorothea_performance_global = dorothea_performance_global %>%
+  mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
+                                          2000, 1000, 500)))
+
+saveRDS(dorothea_performance_global, "output/general_robustness/dorothea_performance.rds")
+
+```
