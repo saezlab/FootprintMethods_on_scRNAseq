@@ -1,0 +1,752 @@
+---
+title: "progeny_dorothea_downsampling"
+author: "Christian Holland"
+date: "24/09/2018"
+output: html_document
+---
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(scran)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(stringr)
+library(forcats)
+library(yardstick)
+library(tidylog)
+library(furrr)
+library(edgeR)
+library(viper)
+library(Matrix)
+library(myutils)
+library(ggrepel)
+library(Rtsne)
+library(cluster)
+library(tidytext)
+library(biobroom)
+library(pheatmap)
+library(cluster)
+library(umap)
+library(reticulate)
+
+source("src/simulation.R")
+
+options("tidylog.display" = list(print))
+options(future.globals.maxSize= 2097152000) # corresponds to 2 GB
+
+plan(multiprocess)
+```
+### Constructing required meta files
+#### Parse benchmark meta data from ChEA3 and manual collection of pathway perturbation
+```{r "parse benchmark meta data from ChEA3 and manual collection of pw pert"}
+df = read_delim("data/in_silico_benchmark/meta_data/Single-TF_Perturbations.gmt", 
+                delim="\t", col_names = F) %>%
+  select(id = X1)
+
+dorothea_tfs = read_csv(
+  "data/regulons/dorothea/dorothea_regulon_human_v1.csv"
+  ) %>%
+  distinct(tf, confidence) %>%
+  rename(target = tf)
+
+knockdown_alias = c("SIRNA", "KO", "SHRNA", "KD")
+overexpression_alias = c("ACTIVATION", "OE", "HYPERACTIVE")
+
+dorothea_meta_df = df %>%
+  filter(str_detect(id, "RNASEQ")) %>%
+  pull(id) %>%
+  str_match(
+    "^([0-9A-Z]*)_([A-Z]*)_([0-9A-Z]*)_HUMAN_(GSE\\d*)_([0-9A-Z]*).*RNASEQ"
+    ) %>%
+  as.data.frame() %>%
+  setNames(
+    ., c("description", "target", "perturbation", "molecule", "accession", "other")
+    ) %>%
+  na_if("") %>%
+  as_tibble() %>%
+  mutate(perturbation = case_when(perturbation %in% knockdown_alias ~ "inhibition",
+                   perturbation %in% overexpression_alias ~ "activation")) %>%
+  mutate(id = paste0("archs:", str_pad(row_number(),4, pad=0))) %>%
+  mutate(class = "single_tf_perturbation") %>%
+  inner_join(dorothea_tfs)
+
+progeny_meta_df = read_csv("data/in_silico_benchmark/meta_data/single_pw_perturbations.csv") %>%
+  mutate_if(is.logical, as.character)
+
+meta_df = bind_rows(dorothea_meta_df, progeny_meta_df)
+
+saveRDS(meta_df, "output/in_silico_benchmark/meta_data/meta_df.rds")
+```
+
+#### Unzip and rename achives manually downloaded from ARCHS4
+```{r "unzip and rename achives"}
+zips = list.files("data/in_silico_benchmark/raw_count_data", full.names = T, 
+                  pattern = "*zip") %>%
+  map(function(archive) {
+    accession = str_match(archive, "GSE\\d*")
+    path = file.path("output", "in_silico_benchmark", "raw_count_data")
+    unzip(archive, exdir = path)
+    file.rename(paste0(path, "/gene_count.tsv"),
+                paste0(path, "/", accession, ".tsv"))
+  })
+```
+
+
+
+#### Load count data, map samples to perturbation experiments and select only protein coding genes
+```{r "load count data and sample samples"}
+anno = readRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds") %>%
+  filter(type == "bulk_sample")
+meta = readRDS("output/in_silico_benchmark/meta_data/meta_df.rds")
+meta_df = inner_join(meta, anno, by="id") %>%
+  select(id, accession, group, sample)
+pcg = readRDS("output/transcript_downsampling/gene_lengths.rds") %>%
+  select(gene)
+
+# read all count matrices and convert them to tidy format
+tidy_counts = list.files("output/in_silico_benchmark/raw_count_data", pattern="*tsv", full.names = T) %>%
+  map_df(function(path) {
+    accession = path %>%
+      basename() %>%
+      tools::file_path_sans_ext()
+    
+    read_delim(path, delim="\t") %>%
+      rename(gene = X1) %>%
+      gather(sample, count, -gene) %>%
+      mutate(accession = accession)
+  }) %>%
+  inner_join(meta_df, by = c("sample", "accession")) %>%
+  select(id, sample, group, gene, count) %>%
+  semi_join(pcg, by="gene") %>%
+  mutate(gene = as_factor(gene))
+
+# double check whether the mapping of samples is correct
+a = meta_df %>% 
+  count(id, group) %>%
+  mutate_if(is.factor, as.character)
+b = tidy_counts %>% 
+  distinct(id,  group, sample) %>% 
+  count(id, group) %>%
+  mutate_if(is.factor, as.character)
+
+stopifnot(identical(a,b))
+anti_join(a,b)
+anti_join(b,a)
+
+tidy_counts %>%
+  select(-group) %>%
+  saveRDS("output/in_silico_benchmark/expression_data/mapped_count_data_tidy.rds")
+```
+
+#### Conversion from counts to TPM
+```{r "Conversion from counts to TPM}
+gene_length = readRDS("output/transcript_downsampling/gene_lengths.rds")
+counts = readRDS("output/in_silico_benchmark/expression_data/mapped_count_data_tidy.rds")
+
+tpm_df = counts %>%
+  #semi_join(exps, by="id") %>%
+  inner_join(gene_length, by="gene") %>%
+  # divide by gene lengths in kb
+  mutate(tmp = count / (length/1000)) %>%
+  group_by(sample) %>%
+  mutate(lib_size = sum(tmp)) %>%
+  ungroup() %>%
+  # divide by library size and one million
+  mutate(tpm = tmp / (lib_size/1000000)) %>%
+  select(id, sample, gene, tpm) %>%
+  mutate(gene = as_factor(gene))
+
+saveRDS(tpm_df, "output/in_silico_benchmark/expression_data/mapped_tpm_data_tidy.rds")
+```
+
+#### Setup simulation parameters
+```{r "setup simulation parameters"}
+# setup parameter combinations
+library_sizes = c(1000, 2000, 5000, 10000, 20000)
+num_cells = c(1, 10, 20, 30, 50, 100)
+# libsize : mean of library size distribution for single cells
+# num_cells: number of cells simulated from single bulk sample
+# reps: how often the simulation should be repeated
+param_combi = expand.grid(library_sizes, num_cells) %>%
+  as_tibble() %>%
+  rename(libsize = Var1, num_cells = Var2) %>%
+  mutate(reps = 30)
+
+saveRDS(param_combi, "output/in_silico_benchmark/simulation/paramter_combinations.rds")
+```
+
+#### Tidy manually curated sample annotation file
+```{r "tidy manually curated sample annotation file"}
+param_combi = readRDS("output/in_silico_benchmark/simulation/paramter_combinations.rds")
+
+raw_anno = read_delim("data/archs4_benchmark/meta_data/sample_annotations.csv", delim = ";") %>%
+  gather(group, sample, -id) %>%
+  separate_rows(sample, sep="[|]") %>%
+  arrange(id, sample) %>%
+  drop_na(sample)
+
+anno_bulk = raw_anno %>%
+  mutate(type = "bulk_sample")
+
+anno_sc = map_df(unique(param_combi$num_cells), .f = function(i) {
+  raw_anno %>%
+    mutate(n = i) %>% 
+    uncount(n) %>%
+    group_by(id, sample) %>%
+    mutate(cell_num = 1:i) %>%
+    ungroup() %>%
+    transmute(id, group, sample, 
+              cell = str_c(sample, "_cell_", str_pad(cell_num, nchar(i)+1, pad=0))) %>%
+    mutate(type = "single_cells") %>%
+    mutate(num_cells = i)
+})
+
+bind_rows(anno_bulk, anno_sc) %>%
+  saveRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds")
+```
+
+#### Create design matrices required for bulk RNAseq normalization and limma
+```{r "create design matrices required for bulk rnaseq normalization"}
+anno = readRDS("output/in_silico_benchmark/meta_data/tidy_sample_annotations.rds") %>%
+  mutate(group = as_factor(group))
+
+design_df = anno %>% 
+  nest(-c(id, type, num_cells)) %>%
+  transmute(id, type, num_cells, design = pmap(., .f=function(data, type, ...) {
+    if (type == "bulk_sample") {
+      design_matrix = data %>%
+        arrange(sample) %>%
+        model.matrix(~0+group, data=.)
+    
+      rownames(design_matrix) = data$sample
+      colnames(design_matrix) = levels(data$group)
+    } else if (type == "single_cells") {
+      design_matrix = data %>%
+        arrange(cell) %>%
+        model.matrix(~0+group, data=.)
+    
+      rownames(design_matrix) = data$cell
+      colnames(design_matrix) = levels(data$group)
+    }
+    return(design_matrix)
+  }))
+
+saveRDS(design_df, "output/in_silico_benchmark/meta_data/design_df.rds")
+```
+### Complete pipeline (simulation, normalization and application of tool)
+#### DoRothEA
+```{r "complete pipeline - dorothea"}
+### DO NOT RUN LOCALLY
+# extract only tf-perturbation experiments
+meta = readRDS("output/in_silico_benchmark/meta_data/meta_df.rds") %>%
+  filter(class == "single_tf_perturbation")
+
+# load bulk expression data
+tpm_df = readRDS("output/in_silico_benchmark/expression_data/mapped_tpm_data_tidy.rds") %>%
+  nest(-c(id, sample), .key="bulk_sample") %>%
+  semi_join(meta, by="id")
+
+count_df = readRDS("output/in_silico_benchmark/expression_data/mapped_count_data_tidy.rds") %>%
+  nest(-c(id, sample), .key="raw_counts") %>%
+  semi_join(meta, by="id")
+
+# load simulation parameters
+param_combi = readRDS("output/in_silico_benchmark/simulation/paramter_combinations.rds") %>%
+  mutate(reps = 10) %>%
+  arrange(-libsize, -num_cells)
+
+# files required for the pipeline
+design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv")
+
+libsize = 10000
+num_cells = 5
+reps = 3
+bulk_sample = bulk_df[1,3] %>% pluck(1,1)
+sample = "GSM2746544"
+run = 1
+
+
+# pipeline for simulated single cells
+# set.seed 
+set.seed(123)
+param_combi %>%
+  # loop over param combinations
+  mutate(col = pmap(., .f = function(libsize, num_cells, reps, ...) {
+    bulk_df = tpm_df %>%
+        mutate(libsize = libsize, num_cells = num_cells, reps = reps)
+    # loop over number of simulation replicates
+    sim_res = map_dfr(seq_len(reps), function(run) {
+      # single cell simulation
+      single_sim_run = bulk_df %>% 
+        # loop over single bulk samples with the given simulation setup
+        mutate(run = run,
+               type = "single_cells",
+               raw_counts = future_pmap(., .f = sc_simulation, .progress = T)) %>%
+        select(-bulk_sample) %>%
+        merge_single_cells()
+      
+      # save raw counts
+      save_path = construct_save_path("dorothea", "raw_counts", "sc",num_cells, libsize, run)
+      saveRDS(single_sim_run, save_path)
+      
+      # normalization 
+      if (!exists("design_df")) {
+        design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+      }
+      norm_single_sim_run = normalize_sc_or_bulk(single_sim_run, design_df)
+      save_path = construct_save_path("dorothea", "norm_expression", "sc",num_cells, libsize, run)
+      saveRDS(norm_single_sim_run, save_path)
+      rm(single_sim_run)
+      
+      
+      # calculation of logFC
+      if (!exists("design_df")) {
+        design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+      }
+      contrast_single_sim_run = calc_contrast(norm_single_sim_run, design_df)
+      save_path = construct_save_path("dorothea", "contrasts", "sc", num_cells, libsize, run)
+      saveRDS(contrast_single_sim_run, save_path)
+      rm(norm_single_sim_run)
+      
+      # calculation of viper scores
+      if (!exists("human_dorothea")) {
+        human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv")
+      }
+      viper_scores_single_sim_run = calc_viper_scores(contrast_single_sim_run)
+      save_path = construct_save_path("dorothea", "viper_scores", "sc", num_cells, libsize, run)
+      saveRDS(viper_scores_single_sim_run, save_path)
+      rm(contrast_single_sim_run, viper_scores_single_sim_run)
+      
+      return(as_tibble(NULL))
+    })
+  }))
+
+# pipeline for bulk
+raw_count_bulk = count_df %>%
+  mutate(libsize = NA_integer_, num_cells = NA_integer_, reps = NA_integer_, run=NA_integer_,
+         type = "bulk_sample") %>%
+  unnest(raw_counts) %>%
+  nest(sample, gene, count) %>%
+  mutate(raw_counts = data %>% map(function(i) {
+    i %>%
+      spread(sample, count) %>%
+      data.frame(row.names=1, check.names = F, stringsAsFactors = F) %>%
+      as.matrix()
+  })) %>%
+  select(-data)
+
+save_path = construct_save_path("dorothea", "raw_counts", "bulk", NULL, NULL, NULL)
+saveRDS(raw_count_bulk, save_path)
+
+# normliatzion
+norm_expression_bulk = normalize_sc_or_bulk(raw_count_bulk, design_df)
+save_path = construct_save_path("dorothea", "norm_expression", "bulk", NULL, NULL, NULL)
+saveRDS(norm_expression_bulk, save_path)
+
+# calcuation of contrast
+contrast_bulk = calc_contrast(norm_expression_bulk, design_df)
+save_path = construct_save_path("dorothea", "contrasts","bulk", NULL, NULL, NULL)
+saveRDS(contrast_bulk, save_path)
+
+# run viper
+viper_bulk = calc_viper_scores(contrast_bulk)
+save_path = construct_save_path("dorothea", "viper_scores", "bulk", NULL, NULL, NULL)
+saveRDS(viper_bulk, save_path)
+```
+#### PROGENy
+```{r "complete pipeline - progeny}
+### DO NOT RUN LOCALLY
+# extract only pathway-perturbation experiments
+meta = readRDS("output/in_silico_benchmark/meta_data/meta_df.rds") %>%
+  filter(class == "single_pw_perturbation")
+
+# load bulk expression data
+tpm_df = readRDS("output/in_silico_benchmark/expression_data/mapped_tpm_data_tidy.rds") %>%
+  nest(-c(id, sample), .key="bulk_sample") %>%
+  semi_join(meta, by="id")
+
+count_df = readRDS("output/in_silico_benchmark/expression_data/mapped_count_data_tidy.rds") %>%
+  nest(-c(id, sample), .key="raw_counts") %>%
+  semi_join(meta, by="id")
+
+# load simulation parameters
+param_combi = readRDS("output/in_silico_benchmark/simulation/paramter_combinations.rds") %>%
+  mutate(reps = 10) %>%
+  arrange(-libsize, -num_cells) %>%
+  filter(libsize == 1000 & num_cells == 10) %>%
+  mutate(reps = 3)
+
+# files required for the pipeline
+design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+model = readRDS("data/full_progeny_matrix/full_progeny_matrix.rds")
+
+# filter based on top x genes
+# top 100 
+m_100 = model %>% group_by(pathway) %>% top_n(100, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore)
+
+# top 200 
+m_200 = model %>% group_by(pathway) %>% top_n(200, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore)
+
+# top 300 
+m_300 = model %>% group_by(pathway) %>% top_n(300, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore)
+
+# top 500 
+m_500 = model %>% group_by(pathway) %>% top_n(500, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore)
+
+# top 1000 
+m_1000 = model %>% group_by(pathway) %>% top_n(1000, -adj.p) %>% ungroup() %>%
+  select(gene, pathway, weight=zscore)
+
+# all 
+m_all = model %>%
+  select(gene, pathway, weight=zscore)
+
+models = tribble(
+  ~M, ~footprints,
+  m_100, 100,
+  m_200, 200,
+  m_300, 300,
+  m_500, 500,
+  m_1000, 1000,
+  m_all, "all"
+) %>%
+  mutate(footprints = as_factor(footprints))
+
+libsize = 1000
+num_cells = 1
+reps = 2
+bulk_sample = bulk_df[1,3] %>% pluck(1,1)
+sample = "GSM2746544"
+run = 1
+
+
+# pipeline for simulated single cells
+# set.seed 
+set.seed(123)
+param_combi %>%
+  # loop over param combinations
+  mutate(col = pmap(., .f = function(libsize, num_cells, reps, ...) {
+    bulk_df = tpm_df %>%
+        mutate(libsize = libsize, num_cells = num_cells, reps = reps)
+    # loop over number of simulation replicates
+    sim_res = map_dfr(seq_len(reps), function(run) {
+      # single cell simulation
+      single_sim_run = bulk_df %>% 
+        # loop over single bulk samples with the given simulation setup
+        mutate(run = run,
+               type = "single_cells",
+               raw_counts = future_pmap(., .f = sc_simulation, .progress = T)) %>%
+        select(-bulk_sample) %>%
+        merge_single_cells()
+      
+      # save raw counts
+      save_path = construct_save_path("progeny", "raw_counts", "sc",num_cells, libsize, run)
+      saveRDS(single_sim_run, save_path)
+      
+      # normalization 
+      if (!exists("design_df")) {
+        design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+      }
+      norm_single_sim_run = normalize_sc_or_bulk(single_sim_run, design_df)
+      save_path = construct_save_path("progeny", "norm_expression", "sc",num_cells, libsize, run)
+      saveRDS(norm_single_sim_run, save_path)
+      rm(single_sim_run)
+      
+      
+      # calculation of logFC
+      if (!exists("design_df")) {
+        design_df = readRDS("output/in_silico_benchmark/meta_data/design_df.rds")
+      }
+      contrast_single_sim_run = calc_contrast(norm_single_sim_run, design_df)
+      save_path = construct_save_path("progeny", "contrasts", "sc", num_cells, libsize, run)
+      saveRDS(contrast_single_sim_run, save_path)
+      rm(norm_single_sim_run)
+      
+      # calculation of progeny scores
+      progeny_scores_single_sim_run = calc_progeny_scores(contrast_single_sim_run)
+      save_path = construct_save_path("progeny", "progeny_scores", "sc", num_cells, libsize, run)
+      saveRDS(progeny_scores_single_sim_run, save_path)
+      rm(contrast_single_sim_run, progeny_scores_single_sim_run)
+      
+      return(as_tibble(NULL))
+    })
+  }))
+
+# pipeline for bulk
+raw_count_bulk = count_df %>%
+  mutate(libsize = NA_integer_, num_cells = NA_integer_, reps = NA_integer_, run=NA_integer_,
+         type = "bulk_sample") %>%
+  unnest(raw_counts) %>%
+  nest(sample, gene, count) %>%
+  mutate(raw_counts = data %>% map(function(i) {
+    i %>%
+      spread(sample, count) %>%
+      data.frame(row.names=1, check.names = F, stringsAsFactors = F) %>%
+      as.matrix()
+  })) %>%
+  select(-data)
+
+save_path = construct_save_path("progeny", "raw_counts", "bulk", NULL, NULL, NULL)
+saveRDS(raw_count_bulk, save_path)
+
+# normliatzion
+norm_expression_bulk = normalize_sc_or_bulk(raw_count_bulk, design_df)
+save_path = construct_save_path("progeny", "norm_expression", "bulk", NULL, NULL, NULL)
+saveRDS(norm_expression_bulk, save_path)
+
+# calcuation of contrast
+contrast_bulk = calc_contrast(norm_expression_bulk, design_df)
+save_path = construct_save_path("progeny", "contrasts","bulk", NULL, NULL, NULL)
+saveRDS(contrast_bulk, save_path)
+
+# run progeny
+progeny_bulk = calc_progeny_scores(contrast_bulk)
+save_path = construct_save_path("progeny", "progeny_scores", "bulk", NULL, NULL, NULL)
+saveRDS(progeny_bulk, save_path)
+```
+
+
+### Performance evaluation
+#### DoRothEA
+```{r "performance evaluation - dorothea"}
+meta = readRDS("output/in_silico_benchmark/meta_data/meta_df.rds") %>%
+  select(target, perturbation, id)
+
+basic_setup = tribble(
+  ~confidence, ~group,
+  "A", "single_conf",
+  "B", "single_conf",
+  "C", "single_conf",
+  "D", "single_conf",
+  "E", "single_conf",
+  "A", "multi_conf",
+  "AB", "multi_conf",
+  "ABC", "multi_conf",
+  "ABCD", "multi_conf",
+  "ABCDE", "multi_conf"
+) %>%
+    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
+                                                    "AB", "ABC", "ABCD", 
+                                                    "ABCDE")))
+
+performance = list.files("output/in_silico_benchmark/simulation/dorothea/viper_scores", full.names = T)[1:3] %>%
+  future_map_dfr(function(path) {
+    df = readRDS(path) %>%
+      unnest() %>%
+      left_join(meta)
+    
+    setup = basic_setup %>%
+      mutate(viper_scores = list(df))
+    
+    confidence = setup %>% pluck(1,1)
+    viper_scores = setup %>% pluck(3,1)
+    
+    input_performance = setup %>%
+      mutate(input = pmap(., .f = function(confidence, viper_scores, ...) {
+          conf_levels = str_split(confidence, "") %>% 
+            pluck(1)
+          
+          # extract number of uniquely covered tfs
+          coverage = viper_scores %>% 
+            filter(confidence %in% conf_levels) %>%
+            filter(tf == target) %>%
+            summarise(coverage = n_distinct(tf)) %>%
+            pull()
+          
+          viper_scores %>%
+            filter(confidence %in% conf_levels) %>%
+            mutate(response = case_when(tf == target ~ 1,
+                                        TRUE ~ 0),
+                   response = factor(response, levels = c("1", "0")),
+                   predictor = case_when(perturbation == "inhibition" ~ -1 * activity,
+                                         perturbation == "activation" ~ activity),
+                   coverage = coverage) %>%
+            select(libsize, num_cells, reps, run, type, response, predictor, coverage)
+      })) %>%
+      select(-viper_scores) %>%
+      unnest(input)
+    
+    meta_performance = input_performance %>%
+      dplyr::count(group, confidence, libsize, num_cells, reps, run, type, response, coverage) %>%
+      spread(response, n) %>%
+      dplyr::rename(positive = `1`, negative = `0`) %>%
+      mutate(random = positive/(positive + negative))
+    
+    # acess metric coordinates
+    roc_coords = input_performance %>%
+      group_by(confidence, group, libsize, num_cells, reps, run, type) %>%
+      roc_curve(response, predictor, options=list(direction = "<")) %>%
+      ungroup() %>%
+      mutate(metric = "roc_curve") %>%
+      left_join(meta_performance, by=c("group", "confidence", "libsize", "num_cells", "reps", "run", "type")) %>%
+      mutate(random = 0.5)
+    
+    roc_path = path %>% 
+      str_replace("viper_scores", "performance") %>%
+      str_replace("viper_scores", "roc_curve")
+    saveRDS(roc_coords, roc_path)
+    
+    pr_coords = input_performance %>%
+      group_by(confidence, group, libsize, num_cells, reps, run, type) %>%
+      pr_curve(response, predictor) %>%
+      ungroup() %>%
+      mutate(metric = "pr_curve") %>%
+      left_join(meta_performance, by=c("group", "confidence", "libsize", "num_cells", "reps", "run", "type"))
+    
+    pr_path = path %>% 
+      str_replace("viper_scores", "performance") %>%
+      str_replace("viper_scores", "pr_curve")
+    saveRDS(pr_coords, pr_path)
+    
+    
+    
+    # acess summary metrics
+    performance_result_roc = input_performance %>% 
+      group_by(confidence, group, libsize, num_cells, reps, run, type) %>%
+      roc_auc(response, predictor, options=list(direction = "<"))
+    
+    performance_result_pr = input_performance %>%
+      group_by(confidence, group, libsize, num_cells, reps, run, type) %>%
+      pr_auc(response, predictor)
+      
+    
+    perfomance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+      left_join(meta_performance, by = c("confidence", "group", "libsize", "num_cells", "reps", "run", "type")) %>%
+      rename(metric = .metric, auc = .estimate) %>%
+      select(-.estimator) %>%
+      mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                                TRUE ~  random),
+             label = case_when(type == "bulk_sample" ~ str_c("bulk", confidence, sep = "_"),
+                               type == "single_cells" ~ str_c("sc", confidence, sep="_"))) %>%
+      nest(-c(libsize, num_cells, reps, run, type))
+      }, .progress = T)
+
+saveRDS(performance, "output/in_silico_benchmark/simulation/dorothea/performance/performance_result.rds")
+
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  roc_curve(response, predictor, options=list(direction = "<")) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/pr_coords.rds")
+```
+
+#### PROGENy
+```{r "performance evaluation - progeny"}
+meta = readRDS("output/in_silico_benchmark/meta_data/meta_df.rds") %>%
+  select(target, perturbation, id)
+
+performance = list.files("output/in_silico_benchmark/simulation/progeny/progeny_scores", full.names = T) %>%
+  future_map_dfr(function(path) {
+    print(path)
+    df = readRDS(path) %>%
+      unnest() %>%
+      left_join(meta)
+    
+    setup = df %>%
+      nest(-footprints, .key="progeny_scores")
+    
+    # footprints = setup %>% pluck(1,1)
+    # progeny_scores = setup %>% pluck(2,1)
+    
+    input_performance = setup %>%
+      mutate(input = pmap(., .f = function(progeny_scores, footprints, ...) {
+          
+          # extract number of uniquely covered pathway
+          coverage = progeny_scores %>% 
+            filter(pathway == target) %>%
+            summarise(coverage = n_distinct(pathway)) %>%
+            pull()
+          
+          progeny_scores %>%
+            mutate(response = case_when(pathway == target ~ 1,
+                                        TRUE ~ 0),
+                   response = factor(response, levels = c("1", "0")),
+                   predictor = case_when(perturbation == "inhibition" ~ -1 * activity,
+                                         perturbation == "activation" ~ activity),
+                   coverage = coverage) %>%
+            select(libsize, num_cells, reps, run, type, response, predictor, coverage)
+      })) %>%
+      select(-progeny_scores) %>%
+      unnest(input)
+    
+    meta_performance = input_performance %>%
+      count(footprints, libsize, num_cells, reps, run, type, response, coverage) %>%
+      spread(response, n) %>%
+      rename(positive = `1`, negative = `0`) %>%
+      mutate(random = positive/(positive + negative))
+    
+    # acess metric coordinates
+    roc_coords = input_performance %>%
+      group_by(footprints, libsize, num_cells, reps, run, type) %>%
+      roc_curve(response, predictor, options=list(direction = "<")) %>%
+      ungroup() %>%
+      mutate(metric = "roc_curve") %>%
+      left_join(meta_performance, by=c("footprints", "libsize", "num_cells", "reps", "run", "type")) %>%
+      mutate(random = 0.5)
+    
+    roc_path = path %>% 
+      str_replace("progeny_scores", "performance") %>%
+      str_replace("progeny_scores", "roc_curve")
+    saveRDS(roc_coords, roc_path)
+    
+    pr_coords = input_performance %>%
+      group_by(footprints, libsize, num_cells, reps, run, type) %>%
+      pr_curve(response, predictor) %>%
+      ungroup() %>%
+      mutate(metric = "pr_curve") %>%
+      left_join(meta_performance, by=c("footprints", "libsize", "num_cells", "reps", "run", "type"))
+    
+    pr_path = path %>% 
+      str_replace("progeny_scores", "performance") %>%
+      str_replace("progeny_scores", "pr_curve")
+    saveRDS(pr_coords, pr_path)
+    
+    performance_result_roc = input_performance %>% 
+      group_by(footprints, libsize, num_cells, reps, run, type) %>%
+      roc_auc(response, predictor, options=list(direction = "<"))
+    
+    
+    performance_result_pr = input_performance %>%
+      group_by(footprints, libsize, num_cells, reps, run, type) %>%
+      pr_auc(response, predictor)
+      
+    
+    performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+      left_join(meta_performance, by = c("footprints", "libsize", "num_cells", "reps", "run", "type")) %>%
+      rename(metric = .metric, auc = .estimate) %>%
+      select(-.estimator) %>%
+      mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                                TRUE ~  random),
+             label = case_when(type == "bulk_sample" ~ str_c("bulk", footprints, sep = "_"),
+                               type == "single_cells" ~ str_c("sc", footprints, sep="_"))) %>%
+      nest(-c(libsize, num_cells, reps, run, type))
+      }, .progress = T)
+
+saveRDS(performance, "output/in_silico_benchmark/simulation/progeny/performance/performance_result.rds")
+```
