@@ -74,7 +74,7 @@ calc_contrast = function(df, design_df) {
   
   x = df %>% 
     left_join(design_df, by=c("id", "type", "num_cells")) %>%
-    mutate(contrast = future_pmap(., .f = function(emat, design, ...) {
+    mutate(contrast = pmap(., .f = function(emat, design, ...) {
       # adjust design matrix as some cells might be lost due to filtering during normalization
       sub_design = design[colnames(emat),]
       stopifnot(rownames(sub_design) == colnames(emat))
@@ -88,9 +88,33 @@ calc_contrast = function(df, design_df) {
         eBayes() %>%
         tidy() %>%
         select(gene, logfc = estimate)
-    }, .progress = T)) %>%
+    })) %>%
     select(-c(emat, design))
 }
+
+ss_calc_contrast = function(df, design_df, col_name) {
+  
+  x = df %>% 
+    rename(emat = !!col_name) %>%
+    left_join(design_df, by=c("id", "type", "num_cells")) %>%
+    mutate(contrast = pmap(., .f = function(emat, design, ...) {
+      # adjust design matrix as some cells might be lost due to filtering during normalization
+      sub_design = design[colnames(emat),]
+      stopifnot(rownames(sub_design) == colnames(emat))
+      contrasts = makeContrasts(
+        con = perturbed - control,
+        levels = sub_design
+      )
+      
+      lmFit(emat, sub_design) %>% 
+        contrasts.fit(contrasts) %>%
+        eBayes() %>%
+        tidy() %>%
+        select(gene, logfc = estimate)
+    })) %>%
+    select(-c(emat, design))
+}
+
 calc_viper_scores = function(df) {
   df %>%
     unnest(contrast) %>%
@@ -113,6 +137,32 @@ calc_progeny_scores = function(df) {
     })) %>%
     select(-data, -M)
 }
+
+ss_calc_progeny_scores = function(emat,...) {
+  x = models %>%
+    select(footprints) %>%
+    mutate(emat = list(emat)) %>%
+    left_join(models, by="footprints") %>%
+    mutate(ss_progeny_result = pmap(., .f = function(emat, M, ...) {
+      M_matrix = M %>%
+        spread(pathway, weight, fill=0) %>%
+        data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+      common_genes = intersect(rownames(emat), rownames(M_matrix))
+      expr_matched = emat[common_genes,,drop=FALSE] %>%
+        t()
+      M_matched = M_matrix[common_genes,, drop=FALSE] %>%
+        data.matrix()
+      
+      stopifnot(names(expr_matched) == rownames(M_matched))
+      
+      scores = expr_matched %*% M_matched
+      progeny_scores = t(scale(scores))
+      return(progeny_scores)
+    })) %>%
+    select(-emat, -M)
+}
+
+
 run_viper = function (E, regulon, gene_name = "gene", value_name = "expression", 
                       id_name = "sample", regulator_name = "tf", ...) {
   meta_data = E %>% select(-c(!!gene_name, !!value_name)) %>% 
@@ -188,4 +238,13 @@ sc_progeny = function(expr, M, ...) {
   scores = expr_matched %*% M_matched
   res = t(scale(scores))
   return(res)
+}
+
+df2regulon <- function(df, regulator_name="tf") {
+  regulon = df %>% split(.[regulator_name]) %>% map(function(dat) {
+    targets = setNames(dat$mor, dat$target)
+    likelihood = dat$likelihood
+    list(tfmode = targets, likelihood = likelihood)
+  })
+  return(regulon)
 }

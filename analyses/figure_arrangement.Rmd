@@ -1,5 +1,5 @@
 ---
-title: "figure_arrangement"
+title: "Arrange individual figures into a collage"
 author: "Christian Holland"
 date: "6/23/2019"
 output: html_document
@@ -17,6 +17,7 @@ These libraries and sources are used in this analysis
 ```{r "setup", message=F}
 library(tidyverse)
 library(cowplot)
+library(gridExtra)
 library(ggpubr)
 library(ggrepel)
 library(ggplotify)
@@ -32,20 +33,31 @@ theme_set(theme_cowplot())
 ```{r}
 progeny_path = "fig/general_robustness/progeny/"
 dorothea_path = "fig/general_robustness/dorothea/"
-p_gene_coverage_vs_auroc = readRDS(str_c(progeny_path, "gene_cov_vs_auroc_all_footprints.rds"))
-d_gene_coverage_vs_auroc = readRDS(str_c(dorothea_path, "gene_cov_vs_auroc.rds"))
+gogsea_path = "fig/general_robustness/gogsea/"
+p_gene_coverage_vs_auroc = readRDS(str_c(progeny_path, "gene_cov_vs_auroc_all_footprints.rds")) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=12),
+        legend.position = c(0.05,0.10)) +
+  ylim(0.45,0.75)
+d_gene_coverage_vs_auroc = readRDS(str_c(dorothea_path, "gene_cov_vs_auroc.rds")) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  ylim(0.45,0.75)
+g_gene_coverage_vs_auroc = readRDS(str_c(gogsea_path, "gene_cov_vs_auroc.rds")) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  ylim(0.45,0.75)
 
 
 general_robustness_main = plot_grid(
-  d_gene_coverage_vs_auroc, p_gene_coverage_vs_auroc,
-  ncol=2, labels=c("a", "b"), label_size = 18,
+  d_gene_coverage_vs_auroc, p_gene_coverage_vs_auroc, g_gene_coverage_vs_auroc,
+  ncol=3, labels=c("a", "b", "c"), label_size = 18,
   align = "vh", axis = "btlr"
 )
 ggsave("paper/figures/main_general_robustness.png", 
        general_robustness_main,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/Fig1_general_robustness.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig1_general_robustness.png",
        general_robustness_main,
        width=10, height=5)
 ```
@@ -54,79 +66,121 @@ ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/Fig1_gene
 ```{r}
 progeny_path = "fig/general_robustness/progeny/"
 dorothea_path = "fig/general_robustness/dorothea/"
+gogsea_path = "fig/general_robustness/gogsea/"
+
+
 
 workflow = ggdraw() +
-  draw_image("fig/general_robustness/workflow.jpg") 
+  draw_image("fig/general_robustness/workflow_with_gogsea.jpg") 
 d_auroc_vs_auprc = readRDS(str_c(dorothea_path, "auroc_vs_auprc.rds"))
 p_auroc_vs_auprc = readRDS(str_c(progeny_path, "auroc_vs_auprc.rds"))
+g_auroc_vs_auprc = readRDS(str_c(gogsea_path, "auroc_vs_auprc.rds"))
+mapping_table = readRDS("fig/general_robustness/gogsea/progeny_go_mapping.rds")
 
 top = plot_grid(workflow, labels=c("a"), label_size = 18)
+mid = plot_grid(mapping_table, labels = c("b"), label_size = 18)
 bottom = plot_grid(
-  d_auroc_vs_auprc, p_auroc_vs_auprc, labels = c("b", "c"), label_size = 18
+  d_auroc_vs_auprc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("c", "d", "e"), label_size = 18, ncol=3
 )
-general_robustness_supp = plot_grid(top, bottom, ncol=1)
+general_robustness_supp = plot_grid(top, mid, bottom, ncol=1)
 
 ggsave("paper/figures/supp_general_robustness.png", 
        general_robustness_supp,
-       width = 10, height = 6)
+       width = 12, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS1_general_robustness.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS1_general_robustness.png",
        general_robustness_supp,
-       width=10, height=6)
+       width=12, height=12)
 ```
 
 ### In silico benchmark
 #### Main
 ```{r "in silico benchmark - main"}
-progeny_path = "fig/in_silico_benchmark/progeny/"
 dorothea_path = "fig/in_silico_benchmark/dorothea/"
+metaviper_path = "fig/in_silico_benchmark/metaviper/"
+daucell_path = "fig/in_silico_benchmark/daucell/"
+progeny_path = "fig/in_silico_benchmark/progeny/"
+paucell_path = "fig/in_silico_benchmark/paucell/"
 
 sim_workflow = ggdraw() +
   draw_image("fig/in_silico_benchmark/simulation_workflow.jpg")
 
-d_roc_curve = readRDS(str_c(dorothea_path, "roc_curve.rds"))
-d_auroc_vs_cov = readRDS(str_c(dorothea_path, "auroc_vs_cov.rds"))
-d_auroc_dist_hmap = readRDS(str_c(dorothea_path, "auroc_distance_hmap.rds"))
+d_roc_curve = readRDS(str_c(dorothea_path, "roc_curve.rds")) + labs(title = "1. Step") + theme(plot.title = element_text(hjust = 0.5))
+d_auroc_vs_cov = readRDS(str_c(dorothea_path, "auroc_vs_cov.rds")) + labs(title = "2. Step") + theme(plot.title = element_text(hjust = 0.5))
+d_auroc_dist_hmap = readRDS(str_c(dorothea_path, "auroc_distance_hmap.rds")) + labs(title = "3. Step") + theme(plot.title = element_text(hjust = 0.5))
 
-p_roc_curve = readRDS(str_c(progeny_path, "roc_curve.rds"))
+mv_auroc_vs_cov = readRDS(str_c(metaviper_path, "auroc_vs_cov.rds"))
+dauc_auroc_vs_cov = readRDS(str_c(daucell_path, "auroc_vs_cov.rds"))
 p_auroc_vs_footprints = readRDS(str_c(progeny_path, "auroc_vs_footprints.rds"))
-p_auroc_dist_hmap = readRDS(str_c(progeny_path, "auroc_distance_hmap.rds"))
+pauc_auroc_vs_footprints = readRDS(str_c(paucell_path, "auroc_vs_footprints.rds"))
 
-legend = get_legend(d_auroc_vs_cov)
+aligned_plots = align_plots(d_roc_curve + theme(legend.position = c(0.65,0.1)),
+                            dauc_auroc_vs_cov + theme(legend.position = "none"),
+                            align = "hv", axis = "btlr")
 
 top = plot_grid(
   sim_workflow, labels = c("a"), label_size = 18
 )
 
-bottom = plot_grid(
-  d_roc_curve + theme(legend.position = "none"),
+mid = plot_grid(
+  aligned_plots[[1]],
   d_auroc_vs_cov + theme(legend.position = "none"), 
-  d_auroc_dist_hmap, 
-  p_roc_curve + theme(legend.position = "none"),
-  p_auroc_vs_footprints + theme(legend.position = "none"), 
-  p_auroc_dist_hmap,
-  NULL, legend,
-  rel_heights = c(0.48, 0.48, 0.04),
-  ncol=3, labels=c("b", "c", "d", "e", "f", "g", NULL, NULL),
-  label_size=18
-)
+  d_auroc_dist_hmap,
+  ncol=3, labels = c("b"), label_size = 18, align="h", axis = "bt"
+  )
+
+bottom = plot_grid(
+  aligned_plots[[2]],
+  mv_auroc_vs_cov + theme(legend.position = "none"),
+  p_auroc_vs_footprints + theme(legend.position = "none"),
+  pauc_auroc_vs_footprints + theme(legend.position = "none"),
+  ncol=4, labels=c("c", "d", "e", "f"), label_size = 18
+  )
 
 in_silico_benchmark_main = plot_grid(
-  top, 
-  bottom,
-  ncol=1, rel_heights = c(1,2)
+  top, mid, bottom,
+  ncol=1, rel_heights = c(1.1,1,1)
   )
 
 ggsave("paper/figures/main_in_silico_benchmark.png", 
        in_silico_benchmark_main,
        width = 15, height = 15)
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/Fig2_in_silico_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig2_in_silico_benchmark.png",
        in_silico_benchmark_main,
        width=15, height=15)
 ```
 
 #### Supp1
-```{r "in silico benchmark 1 - supp"}
+```{r}
+dorothea_path = "fig/in_silico_benchmark/dorothea/"
+progeny_path = "fig/in_silico_benchmark/progeny/"
+
+
+d_benchmark_data = readRDS(str_c(dorothea_path, "benchmark_data.rds")) + 
+  theme(legend.title = element_text(), 
+        legend.position = c(0.01,0.8)) + 
+  labs(fill = "Confidence level",
+       title = "TF perturbation experiments")
+p_benchmark_data = readRDS(str_c(progeny_path, "benchmark_data.rds")) + 
+  labs(title = "Pathway perturbation experiments")
+
+in_silico_benchmark_supp_1 = plot_grid(
+  d_benchmark_data, p_benchmark_data, 
+  labels = c("a", "b"), label_size = 18, align = "h", axis="tb"
+  )
+
+ggsave("paper/figures/supp_in_silico_benchmark_1.png", 
+       in_silico_benchmark_supp_1,
+       width = 10, height = 5)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS2_in_silico_benchmark_1.png",
+       in_silico_benchmark_supp_1,
+       width=10, height=5)
+```
+
+
+#### Supp2
+```{r "in silico benchmark 2 - supp"}
 r_c_d = readRDS("fig/in_silico_benchmark/real_count_distribution.rds")
 s_c_d = readRDS("fig/in_silico_benchmark/sim_count_distribution.rds")
 
@@ -136,7 +190,7 @@ s_m_vs_v = readRDS("fig/in_silico_benchmark/sim_mean_vs_var.rds")
 l_real = readRDS("fig/in_silico_benchmark/real_lib_vs_cov.rds")
 l_sim =  readRDS("fig/in_silico_benchmark/sim_lib_vs_cov.rds")
 
-in_silico_benchmark_supp_1 = plot_grid(
+in_silico_benchmark_supp_2 = plot_grid(
   r_c_d + labs(title = "Real single cell"), 
   s_c_d + labs(title = "Simulated single cell"),
   r_m_vs_v,
@@ -147,81 +201,135 @@ in_silico_benchmark_supp_1 = plot_grid(
   label_size = 18, ncol=2
 )
 
-ggsave("paper/figures/supp_in_silico_benchmark_1.png", 
-       in_silico_benchmark_supp_1,
-       width = 10, height = 15)
-
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS2_in_silico_benchmark_1.png",
-       in_silico_benchmark_supp_1,
-       width=10, height=15)
-```
-#### Supp2
-```{r "in silico benchmark 2 - supp"}
-progeny_path = "fig/in_silico_benchmark/progeny/"
-dorothea_path = "fig/in_silico_benchmark/dorothea/"
-
-
-
-d_benchmark_data = readRDS(str_c(dorothea_path, "benchmark_data.rds"))
-d_run_variance = readRDS(str_c(dorothea_path, "run_variance.rds"))
-d_auroc_vs_auprc = readRDS(str_c(dorothea_path, "auroc_vs_auprc.rds"))
-
-
-p_benchmark_data = readRDS(str_c(progeny_path, "benchmark_data.rds"))
-p_run_variance = readRDS(str_c(progeny_path, "run_variance.rds"))
-p_auroc_vs_auprc = readRDS(str_c(progeny_path, "auroc_vs_auprc.rds"))
-
-
-top = plot_grid(
-  d_benchmark_data, p_benchmark_data, 
-  labels = c("a", "b"), label_size = 18, align = "h", axis="bt"
-  )
-mid = plot_grid(
-  d_run_variance, 
-  p_run_variance, 
-  ncol=1, labels = c("c", "d"), label_size = 18
-  )
-bottom = plot_grid(
-  d_auroc_vs_auprc, p_auroc_vs_auprc,
-  ncol=2, labels = c("e", "f"), label_size = 18
-  )
-
-in_silico_benchmark_supp_2 = plot_grid(
-  top, 
-  mid,
-  bottom, 
-  ncol = 1, rel_heights = c(1,2,1)
-  )
-
 ggsave("paper/figures/supp_in_silico_benchmark_2.png", 
        in_silico_benchmark_supp_2,
        width = 10, height = 15)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS3_in_silico_benchmark_2.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS3_in_silico_benchmark_2.png",
        in_silico_benchmark_supp_2,
        width=10, height=15)
 ```
+
+#### Supp3
+```{r "in silico benchmark 3 - supp"}
+dorothea_path = "fig/in_silico_benchmark/dorothea/"
+metaviper_path = "fig/in_silico_benchmark/metaviper/"
+daucell_path = "fig/in_silico_benchmark/daucell/"
+progeny_path = "fig/in_silico_benchmark/progeny/"
+paucell_path = "fig/in_silico_benchmark/paucell/"
+
+
+d_variance_hmap = readRDS(str_c(dorothea_path, "variance_hmap.rds"))
+mv_variance_hmap = readRDS(str_c(metaviper_path, "variance_hmap.rds"))
+dauc_variance_hmap = readRDS(str_c(daucell_path, "variance_hmap.rds"))
+progeny_variance_hmap = readRDS(str_c(progeny_path, "variance_hmap.rds"))
+pauc_variance_hmap = readRDS(str_c(paucell_path, "variance_hmap.rds"))
+
+in_silico_benchmark_supp_3 = plot_grid(
+  d_variance_hmap,
+  dauc_variance_hmap,
+  mv_variance_hmap,
+  progeny_variance_hmap,
+  pauc_variance_hmap,
+  labels = c("a", "b", "c", "d", "e"), label_size = 18,
+  ncol = 3 
+  )
+
+ggsave("paper/figures/supp_in_silico_benchmark_3.png", 
+       in_silico_benchmark_supp_3,
+       width = 15, height = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS4_in_silico_benchmark_3.png",
+       in_silico_benchmark_supp_3,
+       width=15, height=10)
+```
+#### Supp4
+```{r "in silico benchmark 4 - supp"}
+dorothea_path = "fig/in_silico_benchmark/dorothea/"
+metaviper_path = "fig/in_silico_benchmark/metaviper/"
+daucell_path = "fig/in_silico_benchmark/daucell/"
+progeny_path = "fig/in_silico_benchmark/progeny/"
+paucell_path = "fig/in_silico_benchmark/paucell/"
+
+d_auroc_vs_auprc = readRDS(str_c(dorothea_path, "auroc_vs_auprc.rds"))
+mv_auroc_vs_auprc = readRDS(str_c(metaviper_path, "auroc_vs_auprc.rds")) + theme(legend.position = "none")
+dauc_auroc_vs_auprc = readRDS(str_c(daucell_path, "auroc_vs_auprc.rds")) + theme(legend.position = "none")
+progeny_auroc_vs_auprc = readRDS(str_c(progeny_path, "auroc_vs_auprc.rds")) + theme(legend.position = "none")
+pauc_auroc_vs_auprc = readRDS(str_c(paucell_path, "auroc_vs_auprc.rds")) + theme(legend.position = "none")
+
+
+in_silico_benchmark_supp_4 = plot_grid(
+  d_auroc_vs_auprc,
+  dauc_auroc_vs_auprc,
+  mv_auroc_vs_auprc,
+  progeny_auroc_vs_auprc,
+  pauc_auroc_vs_auprc,
+  ncol = 3, labels = c("a", "b", "c", "d", "e"), label_size = 18, align = "hv", axis = "tblr"
+  )
+
+ggsave("paper/figures/supp_in_silico_benchmark_4.png", 
+       in_silico_benchmark_supp_4,
+       width = 15, height = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS5_in_silico_benchmark_4.png",
+       in_silico_benchmark_supp_4,
+       width=15, height=10)
+```
+
+#### Supp5
+```{r "in silico benchmark 5 - supp"}
+dorothea_path = "fig/in_silico_benchmark/dorothea/"
+metaviper_path = "fig/in_silico_benchmark/metaviper/"
+daucell_path = "fig/in_silico_benchmark/daucell/"
+progeny_path = "fig/in_silico_benchmark/progeny/"
+paucell_path = "fig/in_silico_benchmark/paucell/"
+
+d_hmap = readRDS(str_c(dorothea_path, "auroc_distance_hmap.rds")) + labs(title = "DoRothEA")
+mv_hmap = readRDS(str_c(metaviper_path, "auroc_distance_hmap.rds"))
+dauc_hmap = readRDS(str_c(daucell_path, "auroc_distance_hmap.rds"))
+progeny_hmap = readRDS(str_c(progeny_path, "auroc_distance_hmap.rds"))
+pauc_hmap = readRDS(str_c(paucell_path, "auroc_distance_hmap.rds"))
+
+
+in_silico_benchmark_supp_5 = plot_grid(
+  d_hmap,
+  dauc_hmap,
+  mv_hmap,
+  progeny_hmap,
+  pauc_hmap,
+  ncol = 3, labels = c("a", "b", "c", "d", "e"), label_size = 18, align = "hv", axis = "tblr"
+  )
+
+ggsave("paper/figures/supp_in_silico_benchmark_5.png", 
+       in_silico_benchmark_supp_5,
+       width = 15, height = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS6_in_silico_benchmark_5.png",
+       in_silico_benchmark_supp_5,
+       width=15, height=10)
+```
+
 ### In vitro benchmark
 #### Main
 ```{r "in vitro benchmark"}
 path = "fig/in_vitro_benchmark/"
 
 roc_vs_cov_ind = readRDS(str_c(path, "roc_vs_cov_ind.rds"))
-roc_vs_pr_ind = readRDS(str_c(path, "roc_vs_pr_ind.rds"))
-roc_vs_cov_sub = readRDS(str_c(path, "roc_vs_cov_sub.rds"))
-roc_vs_pr_sub = readRDS(str_c(path, "roc_vs_pr_sub.rds"))
+roc_vs_pr_ind = readRDS(str_c(path, "roc_vs_pr_ind.rds")) + theme(legend.position = "none")
+# roc_vs_cov_sub = readRDS(str_c(path, "roc_vs_cov_sub.rds")) + theme(legend.position = "none")
+# roc_vs_pr_sub = readRDS(str_c(path, "roc_vs_pr_sub.rds")) + theme(legend.position = "none")
 
 in_vitro_benchmark_main = plot_grid(
-  roc_vs_cov_ind, roc_vs_cov_sub, roc_vs_pr_ind, roc_vs_pr_sub,
-  ncol = 2, labels = c("a", "c", "b", "d"), label_size = 18,
-  rel_widths = c(2.5,1), align = "v", axis="l"
+  roc_vs_cov_ind,
+  ncol = 1, label_size = 18,
+  align = "h", axis="l"
   )
 ggsave("paper/figures/main_in_vitro_benchmark.png", 
-       in_vitro_benchmark_main , width = 10, height=10)
+       in_vitro_benchmark_main , width = 10, height=5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/Fig3_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig3_in_vitro_benchmark.png",
        in_vitro_benchmark_main,
-       width=10, height=10)
+       width=10, height=5)
 ```
 #### Supp
 ```{r}
@@ -229,10 +337,23 @@ path = "fig/in_vitro_benchmark/"
 h = readRDS(str_c(path, "histogram_of_logfc.rds"))
 l = readRDS(str_c(path, "libsize_num_cells.rds"))
 q = readRDS(str_c(path, "quality_check.rds"))
-b = readRDS(str_c(path, "benchmark_data.rds"))
+b = readRDS(str_c(path, "benchmark_data.rds")) + 
+  theme(legend.title = element_text())
+  labs(fill = "Confidence score")
 
-roc_curves = readRDS(str_c(path, "roc_curves.rds"))
-pr_curves = readRDS(str_c(path, "pr_curves.rds"))
+# viper_roc_curves = readRDS(str_c(path, "viper_roc_curves.rds"))
+# metaviper_roc_curves = readRDS(str_c(path, "metaviper_roc_curves.rds")) +
+#   theme(legend.position = "none")
+# aucell_roc_curves = readRDS(str_c(path, "aucell_roc_curves.rds")) +
+#   theme(legend.position = "none")
+# viper_pr_curves = readRDS(str_c(path, "viper_pr_curves.rds"))
+# metaviper_pr_curves = readRDS(str_c(path, "metaviper_pr_curves.rds")) +
+#   theme(legend.position = "none")
+# aucell_pr_curves = readRDS(str_c(path, "aucell_pr_curves.rds")) +
+#   theme(legend.position = "none")
+
+roc_vs_pr_ind = readRDS(str_c(path, "roc_vs_pr_ind.rds")) + 
+  theme(legend.position = "top")
 
 top = plot_grid(
   b, l,
@@ -242,23 +363,26 @@ top = plot_grid(
 middle = plot_grid(
   q, h,
   ncol=2, labels = c("c", "d"), label_size = 18, align="hv", axis="btlr",
-  rel_widths = c(1,1.5)
+  rel_widths = c(1,1.4)
 )
 
+# bottom = plot_grid(
+#   viper_roc_curves, aucell_roc_curves, metaviper_roc_curves,
+#   viper_pr_curves, aucell_pr_curves, metaviper_pr_curves,
+#   ncol=3, labels=c("e", "f", "g", "h", "i", "j"), label_size = 18, align="vh", axis="lbt"
+# )
 bottom = plot_grid(
-  roc_curves,
-  pr_curves,
-  ncol=1, labels=c("e", "f"), label_size = 18, align="v", axis="l"
+  roc_vs_pr_ind, labels = c("e"), label_size = 18
 )
 
-in_vitro_benchmark_supp = plot_grid(top, middle, bottom, ncol=1, align="v", axis="l", rel_heights = c(1,1,2))
+in_vitro_benchmark_supp = plot_grid(top, middle, bottom, ncol=1, align="v", axis="l", rel_heights = c(1,1,1))
 
 ggsave("paper/figures/supp_in_vitro_benchmark.png", 
-       in_vitro_benchmark_supp , width = 13, height=18)
+       in_vitro_benchmark_supp , width = 14, height=14)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS3_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS7_in_vitro_benchmark.png",
        in_vitro_benchmark_supp,
-       width=13, height=18)
+       width=14, height=14)
 ```
 
 ### Clustering analysis
@@ -267,67 +391,132 @@ ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS3_in_
 path = "fig/clustering_analysis/"
 
 dend = readRDS(str_c(path, "dendogram.rds"))
-dorothea_cor = readRDS(str_c(path, "dorothea_cor_plot.rds"))
-pfootprints_cor = readRDS(str_c(path, "pfootprints_cor_plot.rds"))
-progeny_cor = readRDS(str_c(path, "progeny_cor_plot.rds"))
+tf_cor = readRDS(str_c(path, "tf_cor_plot.rds")) + guides(color = guide_legend(ncol=3)) 
+pw_cor = readRDS(str_c(path, "pathway_cor_plot.rds")) + guides(color = guide_legend(ncol=3)) 
 
-viper_vs_norm = readRDS(str_c(path, "viper_greater_norm.rds"))
+activity_vs_expression = readRDS(str_c(path, "activity_greater_expression.rds")) + guides(color = guide_legend(nrow=1)) 
 
-pw_celltype_hmap = readRDS(str_c(path, "pw_celltype_hmap.rds"))
-tf_celltype_hmap = readRDS(str_c(path, "tf_celltype_hmap.rds"))
+progeny_hmap = readRDS(str_c(path, "progeny_hmap.rds"))
+pauc_hmap = readRDS(str_c(path, "paucell_hmap.rds"))
+dauc_hmap = readRDS(str_c(path, "daucell_hmap.rds"))
+viper_hmap = readRDS(str_c(path, "viper_hmap.rds"))
 
 first_row = plot_grid(
-  dend, dorothea_cor,
+  dend, tf_cor,
   ncol=2, labels=c("a", "b"), label_size = 18
 )
 
 second_row = plot_grid(
-  progeny_cor, pfootprints_cor, 
-  ncol=2, labels=c("d", "e"), label_size = 18
+  activity_vs_expression, pw_cor, 
+  ncol=2, labels=c("c", "d"), label_size = 18, align = "h", axis = "t"
 )
 third_row = plot_grid(
-  viper_vs_norm, labels = "c", label_size = 18
+  progeny_hmap, pauc_hmap, labels = c("e","f"), label_size = 18, rel_widths = c(1.13,1)
 )
 
 fourth_row = plot_grid(
-  pw_celltype_hmap, tf_celltype_hmap,
-  labels = c("f", "g"), label_size = 18,
-  rel_widths = c(1,1.6)
+  viper_hmap, dauc_hmap,
+  labels = c("g", "h"), label_size = 18, rel_widths = c(1.13,1)
 )
 
-clustering_analysis_main = plot_grid(first_row, second_row, third_row, fourth_row, ncol=1)
+clustering_analysis_main = plot_grid(first_row, second_row, third_row, fourth_row, ncol=1, rel_heights = c(1.1,1.0,1.2,2))
 
 ggsave("paper/figures/main_clustering_analysis.png", 
        clustering_analysis_main,
-       width = 12, height = 15)
+       width = 14, height = 18)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/Fig4_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig4_clustering_analysis.png",
        clustering_analysis_main,
-       width=12, height=15)
+       width=14, height=18)
 
 ```
-#### Supp
+#### Supp1
 ```{r "clustering analysis"}
 path = "fig/clustering_analysis/"
 
-dorothea_cor_all_hrchy = readRDS(str_c(path, "dorothea_cor_plot_all_hrchy.rds"))
-pfootprints_cor_all_hrchy = readRDS(str_c(path, "pfootprints_cor_plot_all_hrchy.rds"))
-progeny_cor_all_hrchy = readRDS(str_c(path, "progeny_cor_plot_all_hrchy.rds"))
+expr_cor_all_hrchy = readRDS(str_c(path, "expr_cor_plot_all_hrchy.rds"))
 
-clustering_analysis_supp = plot_grid(
-  dorothea_cor_all_hrchy,
-  progeny_cor_all_hrchy,
-  pfootprints_cor_all_hrchy,
-  ncol = 1, labels = c("a","b", "c"), label_size = 3
+clustering_analysis_supp_1 = plot_grid(
+  expr_cor_all_hrchy,
+  ncol = 1
   )
 
-ggsave("paper/figures/supp_clustering_analysis.png", 
-       clustering_analysis_supp,
-       width = 12, height = 15)
+ggsave("paper/figures/supp_clustering_analysis_1.png", 
+       clustering_analysis_supp_1,
+       width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/HollandEtAlGenBio/Figures/FigS4_clustering_analysis.png",
-       clustering_analysis_supp,
-       width=12, height=15)
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS8_clustering_analysis.png",
+       clustering_analysis_supp_1,
+       width=10, height=5)
 
 ```
 
+#### Supp2
+```{r "clustering analysis"}
+path = "fig/clustering_analysis/"
+
+tf_cor_all_hrchy = readRDS(str_c(path, "tf_cor_plot_all_hrchy.rds")) +
+  scale_x_continuous(breaks = c(-0.25,0,0.25,0.5)) +
+  theme(axis.text = element_text(size=12))
+
+tf = readRDS(str_c(path, "tf_stats_plot.rds")) + theme(legend.position = "top",
+                                                       legend.key.width = unit(2, "cm"))
+
+
+clustering_analysis_supp_2 = plot_grid(
+  tf,
+  tf_cor_all_hrchy,
+  ncol = 1, labels = c("a","b"), label_size = 18, align = "v", axis="lr"
+  )
+
+ggsave("paper/figures/supp_clustering_analysis_2.png", 
+       clustering_analysis_supp_2,
+       width = 10, height = 12)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS9_clustering_analysis.png",
+       clustering_analysis_supp_2,
+       width=10, height=12)
+
+```
+#### Supp3
+```{r}
+path = "fig/clustering_analysis/"
+pw = readRDS(str_c(path, "pw_stats_plot.rds")) + theme(legend.position = "top",
+                                                       legend.key.width = unit(2, "cm"))
+pw_cor_all_hrchy = readRDS(str_c(path, "pathway_cor_plot_all_hrchy.rds")) +
+  scale_x_continuous(breaks = c(-0.25,0,0.25,0.5)) +
+  theme(axis.text = element_text(size=12))
+
+clustering_analysis_supp_3 = plot_grid(
+  pw, 
+  pw_cor_all_hrchy,
+  labels = c("a", "b"), label_size = 18, ncol = 1, align = "v",
+  axis ="lr"
+  )
+
+ggsave("paper/figures/supp_clustering_analysis_3.png", 
+       clustering_analysis_supp_3,
+       width = 10, height = 12)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS10_clustering_analysis.png",
+       clustering_analysis_supp_3,
+       width=10, height=12)
+```
+
+#### Supp4
+```{r "clustering analysis"}
+path = "fig/clustering_analysis/"
+
+mv_hmap = readRDS(str_c(path, "metaviper_hmap.rds"))
+
+clustering_analysis_supp_4 = plot_grid(mv_hmap)
+
+ggsave("paper/figures/supp_clustering_analysis_4.png", 
+       clustering_analysis_supp_4,
+       width = 10, height = 15)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS11_clustering_analysis.png",
+       clustering_analysis_supp_4,
+       width=10, height=15)
+
+```

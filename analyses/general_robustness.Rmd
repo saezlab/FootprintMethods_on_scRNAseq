@@ -1,5 +1,5 @@
 ---
-title: "progeny_dorothea_downsampling"
+title: "General robustness of bulk based functional genomics tools with respect to low gene coverage"
 author: "Christian Holland"
 date: "24/09/2018"
 output: html_document
@@ -17,24 +17,23 @@ These libraries and sources are used in this analysis
 ```{r "setup", message=F}
 library(tidyverse)
 library(furrr)
-library(cowplot)
 library(viper)
-library(myutils)
 library(pROC)
 library(PRROC)
 library(biobroom)
-library(ggpubr)
+library(msigdf)
+library(fgsea)
 
 source("src/roc_curve_analysis.R")
 source("src/progeny_analysis.R")
 source("src/dorothea_analysis.R")
 source("src/my_ggplot_themes.R")
 
-plan(multiprocess)
+plan(multiprocess, workers=4)
 ```
 ### Utility functions
 ```{r "utility functions"}
-mimic_dropout = function(df, dropin, reps, ...) {
+induce_low_gene_coverage = function(df, dropin, reps, ...) {
   if (dropin == "all") {
     x = df %>%
       mutate(run = 1) %>%
@@ -58,6 +57,7 @@ mimic_dropout = function(df, dropin, reps, ...) {
 model = readRDS("data/progeny_models/full_matrix/full_progeny_matrix.rds")
 
 # filter based on top x genes
+
 # top 100 
 m_100 = model %>% group_by(pathway) %>% top_n(100, -adj.p) %>% ungroup() %>%
   select(gene, pathway, weight=zscore) %>%
@@ -94,17 +94,6 @@ m_all = model %>%
   spread(pathway, weight, fill = 0) %>%
   data.frame(row.names=1, check.names = F)
 
-# fiter based on p-value
-# distribution of p-values
-model %>% 
-  filter(pathway == "WNT") %>%
-  ggplot(aes(x=p.value)) +
-  geom_histogram() +
-  facet_wrap(~pathway)
-
-model %>% 
-  filter(p.value < 0.05) %>%
-  count(pathway)
 
 ##
 expr = readRDS("data/general_robustness/progeny_benchmark_data.rds") %>%
@@ -125,19 +114,22 @@ M = tribble(
 
 reps = 25
 dropins = c("all", "500", "1000", "2000", "3000", "5000", "7000", "8000")
-#dropins = c("all", "1000")
 
-design = tibble(dropin = dropins) %>%
+set.seed(123)
+pathway_low_coverage_df = tibble(dropin = dropins) %>%
   mutate(organism = "human") %>%
   inner_join(expr, by="organism") %>%
   mutate(reps = reps) %>%
-  mutate(df = pmap(., .f=mimic_dropout)) %>%
-  unnest(df) %>%
+  mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
+  unnest(df) 
+
+
+design = pathway_low_coverage_df %>%
   inner_join(M, by="organism")
 
 # run progeny and measure performance globally
 progeny_performance_global = design %>%
-  mutate(activity = pmap(., .f = run_progeny)) %>%
+  mutate(activity = future_pmap(., .f = run_progeny, .progress = T)) %>%
   select(-c(df, M, missing_value)) %>%
   mutate(activity = activity %>% map(prepare_progeny_for_roc, filter_tn=T)) %>%
   mutate(roc = activity %>% map(calc_roc_curve),
@@ -147,7 +139,7 @@ progeny_performance_global = progeny_performance_global %>%
   mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
                                           2000, 1000, 500)))
 
-saveRDS(progeny_performance_global, "output/general_robustness/progeny_perforance.rds")
+saveRDS(progeny_performance_global, "output/general_robustness/progeny_performance.rds")
 ```
 
 #### DoRothEA
@@ -158,7 +150,7 @@ expr = readRDS("data/general_robustness/dorothea_benchmark_data.rds") %>%
   filter(organism == "human") %>%
   nest(-organism, .key="df")
 
-human_regulon = dorothea_regulon_human_v1 %>%
+human_regulon = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv")
   filter(confidence %in% c("A", "B"))
 
 R = tribble(
@@ -171,18 +163,19 @@ reps = 25
 dropins = c("500", "1000", "2000","3000","5000", "7000", "8000", "all")
 #dropins = c("1000")
 
+set.seed(123)
 design = tibble(dropin = dropins) %>%
   mutate(organism = "human") %>%
   inner_join(expr, by="organism") %>%
   mutate(reps = reps) %>%
-  mutate(df = pmap(., .f=mimic_dropout)) %>%
+  mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
   unnest(df) %>%
   inner_join(R, by="organism") 
   
 
 # run dorothea and measure performance globally
 dorothea_performance_global = design %>%
-  mutate(activity = pmap(., .f = run_dorothea)) %>%
+  mutate(activity = future_pmap(., .f = run_dorothea, .progress = T)) %>%
   select(-c(df, regulon, missing_value)) %>%
   mutate(activity = activity %>% map(prepare_dorothea_for_roc, 
                                      filter_tn = T)) %>%
@@ -195,5 +188,109 @@ dorothea_performance_global = dorothea_performance_global %>%
                                           2000, 1000, 500)))
 
 saveRDS(dorothea_performance_global, "output/general_robustness/dorothea_performance.rds")
+```
 
+#### GSEA with GO-terms
+```{r}
+expr = readRDS("data/general_robustness/progeny_benchmark_data.rds") %>%
+  filter(organism == "human") %>%
+  nest(-organism, .key="df")
+
+# map PROGENy pathways to corresponding GO terms
+progeny_go_mapping = tribble(
+  ~progeny, ~geneset,~id,
+  "Androgen", "GO_ANDROGEN_RECEPTOR_SIGNALING_PATHWAY", "GO:0030521",
+  "EGFR", "GO_ERBB_SIGNALING_PATHWAY", "GO:0038127",
+  "Estrogen", "GO_INTRACELLULAR_ESTROGEN_RECEPTOR_SIGNALING_PATHWAY", "GO:0030520",
+  "Hypoxia", "GO_REGULATION_OF_CELLULAR_RESPONSE_TO_HYPOXIA", "GO:1900037",
+  "JAK-STAT", "GO_JAK_STAT_CASCADE_INVOLVED_IN_GROWTH_HORMONE_SIGNALING_PATHWAY", "GO:0060397",
+  "MAPK","GO_REGULATION_OF_MAPK_CASCADE", "GO:0043408",
+  "NFkB", "GO_NIK_NF_KAPPAB_SIGNALING", "GO:0038061",
+  "p53", "GO_REGULATION_OF_DNA_DAMAGE_RESPONSE_SIGNAL_TRANSDUCTION_BY_P53_CLASS_MEDIATOR", "GO:0043516",
+  "PI3K", "GO_PHOSPHATIDYLINOSITOL_3_KINASE_SIGNALING", "GO:0014065",
+  "TGFb", "GO_TRANSFORMING_GROWTH_FACTOR_BETA_RECEPTOR_SIGNALING_PATHWAY", "GO:0007179",
+  "TNFa","GO_TUMOR_NECROSIS_FACTOR_MEDIATED_SIGNALING_PATHWAY", "GO:0033209",
+  "Trail", "GO_EXTRINSIC_APOPTOTIC_SIGNALING_PATHWAY_VIA_DEATH_DOMAIN_RECEPTORS", "GO:0008625",
+  "VEGF", "GO_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_SIGNALING_PATHWAY", "GO:0038084",
+  "WNT", "GO_WNT_SIGNALING_PATHWAY", "GO:0016055"
+)
+
+saveRDS(progeny_go_mapping, "output/general_robustness/progeny_go_mapping.rds")
+
+# transformation of progeny matrix to gene sets
+go_genesets = msigdf.human %>%
+  inner_join(progeny_go_mapping) %>%
+  select(pathway = progeny, gene = symbol) %>%
+  group_by(pathway) %>%
+  summarise(geneset = list(gene)) %>%
+  deframe()
+
+G = tribble(
+  ~organism, ~geneset, ~missing_value, ~qc, ~qc_th,
+  "human",  go_genesets, 0, F, 0
+)
+
+# design experiments
+reps = 25
+dropins = c("500", "1000", "2000","3000","5000", "7000", "8000", "all")
+
+design = tibble(dropin = dropins) %>%
+  mutate(organism = "human") %>%
+  inner_join(expr, by="organism") %>%
+  mutate(reps = reps) %>%
+  mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
+  unnest(df) %>%
+  inner_join(G, by="organism") 
+
+
+run_gsea = function(df, geneset, ...) {
+  meta_df = df %>%
+    select(one_of("id", "accession", "pathway", "platform", "info", "treatment",
+                  "effect", "source", "sign", "from", "disease",
+                  "disease_name", "do_id", "run")) %>%
+    distinct()
+  
+  
+  expr = df %>%
+    select(gene, id, expression) %>%
+    spread(id, expression, fill=0) %>% 
+    drop_na() %>%
+    data.frame(row.names=1, stringsAsFactors = F, check.names = F)
+  
+  
+  res = apply(expr, 2, function(col) {
+      fgsea(pathways = genesets,
+            stats = col,
+            nperm = 1000) %>%
+        as_tibble() %>%
+      select(pathway, NES)
+    }) %>%
+      enframe() %>%
+      unnest(value) %>%
+      spread(name, NES) %>%
+      data.frame(row.names = 1, check.names = F, stringsAsFactors = F) %>%
+    rownames_to_column("progeny_pathway") %>%
+    gather(key=id, value="score", -progeny_pathway) %>%
+    as_tibble() %>%
+    filter(score != 0) %>%
+    inner_join(., meta_df, by="id")
+}
+
+  
+
+# run gsea and measure performance globally
+gogsea_performance_global = design %>%
+  mutate(activity = future_pmap(., .f = run_gsea, .progress = T)) %>%
+  select(-c(df, geneset, missing_value)) %>%
+  mutate(activity = activity %>% map(prepare_progeny_for_roc, 
+                                     filter_tn = T)) %>%
+  mutate(roc = activity %>% map(calc_roc_curve),
+         pr = activity %>% map(calc_pr_curve),
+         roc_obj = activity %>% map(get_roc_object))
+
+gogsea_performance_global = gogsea_performance_global %>%
+  mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
+                                          2000, 1000, 500)))
+
+saveRDS(gogsea_performance_global, "output/general_robustness/gogsea_performance.rds")
 ```
