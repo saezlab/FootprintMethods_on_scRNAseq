@@ -29,7 +29,7 @@ run_dorothea = function(df, qc=F, qc_th = 0, missing_value=0, regulon,...) {
   meta_df = df %>%
     filter(id %in% keep_ids) %>%
     select(one_of("id", "accession", "tf", "platform", "info", "effect", 
-                  "source","sign", "disease", "disease_name", "do_id")) %>%
+                  "source","sign", "disease", "disease_name", "do_id", "run")) %>%
     distinct()
   
   meta_regulon = regulon %>%
