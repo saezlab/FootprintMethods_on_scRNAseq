@@ -8,7 +8,8 @@
 #' @param missing_value chose between 0 and NA to replace missing values
 #' @return tidy data frame of PROGENy results for a given set of experiments
 #'   and their corresponding meta information 
-run_progeny = function(df, M, missing_value=0, ...) {
+run_progeny = function(df, M, missing_value=0, dropin = NULL, footprints = NULL, ...) {
+  message(dropin, "-", footprints)
   if (!(any(c(0, NA) %in% missing_value))) {
     stop(paste0("missing_value must be either 0 or NA but is: ", missing_value))
   }
