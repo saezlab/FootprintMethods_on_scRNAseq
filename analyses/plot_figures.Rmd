@@ -1,5 +1,5 @@
 ---
-title: "figure_arrangement"
+title: "Script to plot individual figures"
 author: "Christian Holland"
 date: "6/23/2019"
 output: html_document
