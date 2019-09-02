@@ -196,7 +196,7 @@ saveRDS(param_combi, "output/in_silico_benchmark/simulation/paramter_combination
 ```{r "tidy manually curated sample annotation file"}
 param_combi = readRDS("output/in_silico_benchmark/simulation/paramter_combinations.rds")
 
-raw_anno = read_delim("data/archs4_benchmark/meta_data/sample_annotations.csv", delim = ";") %>%
+raw_anno = read_delim("data/in_silico_benchmark/meta_data/sample_annotations.csv", delim = ";") %>%
   gather(group, sample, -id) %>%
   separate_rows(sample, sep="[|]") %>%
   arrange(id, sample) %>%
