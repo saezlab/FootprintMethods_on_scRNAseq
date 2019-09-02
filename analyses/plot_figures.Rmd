@@ -604,7 +604,7 @@ text_df = performance_result %>%
   
 auroc_distance_hmap = input %>%
   ggplot(aes(x=num_cells, y=libsize)) +
-  geom_tile(aes(fill=d,  width=0.99, height=0.99), size=1) +
+  geom_tile(aes(fill=d, color=highlight, width=0.99, height=0.99), size=1) +
   theme(title = element_text(size=14),
         axis.text = element_text(size=14),
         legend.text = element_text(size=14),
@@ -614,8 +614,8 @@ auroc_distance_hmap = input %>%
   guides(fill = guide_colorbar("Distance"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell") +
-  scale_fill_gradient2(low = rwth_color("green"), 
-                       mid = "white", 
+  scale_fill_gradient2(low = rwth_color("green"),
+                       mid = "white",
                        high = rwth_color("orange")) +
   scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=0)
