@@ -232,7 +232,7 @@ in_silico_benchmark_supp_3 = plot_grid(
   progeny_variance_hmap,
   pauc_variance_hmap,
   labels = c("a", "b", "c", "d", "e"), label_size = 18,
-  ncol = 3 
+  ncol = 3
   )
 
 ggsave("paper/figures/supp_in_silico_benchmark_3.png", 
