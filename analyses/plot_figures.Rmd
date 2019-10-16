@@ -1572,7 +1572,159 @@ variance_hmap = performance_result %>%
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/paucell/variance_hmap.rds")
 ```
+#### Summary figures
+##### TF analysis AUROC
+```{r}
+dorothea = readRDS("output/in_silico_benchmark/simulation/dorothea/ss_viper_performance/performance_result.rds") %>%
+  mutate(tool = "DoRothEA")
+daucell = readRDS("output/in_silico_benchmark/simulation/dorothea/ss_daucell_performance/performance_result.rds") %>%
+  mutate(tool = "D-AUCell")
+metaviper = readRDS("output/in_silico_benchmark/simulation/dorothea/ss_metaviper_performance/performance_result.rds") %>%
+  mutate(tool = "metaVIPER")
 
+performance = bind_rows(dorothea, daucell, metaviper) %>%
+  mutate(tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER"))) %>%
+  unnest() %>%
+  group_by(tool,libsize, num_cells, type, confidence, group, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk"))
+
+tf_analysis = performance %>%
+  filter(metric == "roc_auc") %>%
+  # filter(type == "Single cells") %>%
+  filter(num_cells == 10 & libsize == 5000 | type == "Bulk") %>%
+  ggplot(aes(x=mean_auc, y=coverage, color=tool, alpha=type)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auc - sd_auc,
+                    xmax = mean_auc + sd_auc, height=0), 
+                 show.legend = F, alpha=0.3) +
+  geom_path() +
+  geom_vline(xintercept = 0.5, lty = "dashed") +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  scale_alpha_manual(values = c(0.25,1)) +
+  facet_wrap(~tool, scales = "free_y") +
+  theme(legend.position = "top") +
+  guides(color=F) +
+  my_theme() +
+  labs(x="AUROC", y="Coverage")
+
+tf_summary = performance %>%
+  mutate(tool = case_when(
+    tool == "DoRothEA" ~ "DoRo.",
+    tool == "D-AUCell" ~ "D-AUC.",
+    tool == "metaVIPER" ~ "metaV."
+  )) %>%
+  filter(metric == "roc_auc") %>%
+  filter(type == "Single cells") %>%
+  group_by(tool, num_cells, libsize, confidence) %>%
+  summarise(m = mean(mean_auc)) %>%
+  ungroup() %>%
+  group_by(libsize, num_cells, confidence) %>%
+  slice(which.max(m)) %>%
+  ungroup() %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells)) %>%
+  filter(confidence %in% c("AB")) %>%
+  ggplot(aes(x=num_cells, y=libsize, fill=m, label = tool)) +
+  geom_tile(width=0.99, height=0.99, size=1) +
+  theme(title = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_rect(colour = "white", fill="white"),
+        strip.text.x  = element_text(size=14)) +
+  guides(fill = guide_colorbar("AUROC"), color=F) +
+  labs(x="Number of single cells per bulk sample", 
+       y="Mean library size of single cell") +
+  geom_text(color="white") +
+  facet_wrap(~confidence) +
+  scale_fill_gradient(low = rwth_color("petrol25"), 
+                      high = rwth_color("petrol"))
+```
+
+##### Pathway analysis AUROC
+```{r}
+progeny = readRDS("output/in_silico_benchmark/simulation/progeny/ss_progeny_performance/performance_result.rds") %>%
+  mutate(tool = "PROGENy")
+paucell = readRDS("output/in_silico_benchmark/simulation/progeny/ss_paucell_performance/performance_result.rds") %>%
+  mutate(tool = "P-AUCell")
+
+performance = bind_rows(progeny, paucell) %>%
+  mutate(tool = factor(tool, levels = c("PROGENy", "P-AUCell"))) %>%
+  unnest() %>%
+  group_by(tool,libsize, num_cells, type, footprints, metric) %>%
+  summarise(mean_auc = mean(auc),
+            sd_auc = sd(auc),
+            coverage = mean(coverage),
+            random = mean(random),
+            positive = mean(positive),
+            negative = mean(negative)) %>%
+  ungroup() %>%
+  mutate(type = case_when(type == "single_cells" ~ "Single cells",
+                          TRUE ~ "Bulk")) %>%
+  mutate(footprints = fct_recode(footprints, All = "all"),
+         footprints = fct_relevel(footprints, "1000", after = 4)) 
+
+pathway_analysis = performance %>%
+  filter(metric == "roc_auc") %>%
+  # filter(type == "Single cells") %>%
+  filter(num_cells == 10 & libsize == 5000 | type == "Bulk") %>%
+  ggplot(aes(x=mean_auc, y=footprints, color=tool, alpha=type)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auc - sd_auc,
+                    xmax = mean_auc + sd_auc, height=0), 
+                 show.legend = F, alpha=0.3) +
+  geom_vline(xintercept = 0.5, lty = "dashed") +
+  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  scale_alpha_manual(values = c(0.25,1)) +
+  facet_wrap(~tool, scales = "free_y") +
+  theme(legend.position = "top") +
+  guides(color=F) +
+  my_theme() +
+  labs(x="AUROC", y="# footprint genes per pathway")
+
+plot_grid(tf_analysis, pathway_analysis, ncol=1, align = "v", axis="l")
+
+pathway_summary = performance %>%
+  mutate(tool = case_when(
+    tool == "PROGENy" ~ "PROG.",
+    tool == "P-AUCell" ~ "P-AUC."
+  )) %>%
+  filter(metric == "roc_auc") %>%
+  filter(type == "Single cells") %>%
+  group_by(tool, num_cells, libsize, footprints) %>%
+  summarise(m = mean(mean_auc)) %>%
+  ungroup() %>%
+  group_by(libsize, num_cells, footprints) %>%
+  slice(which.max(m)) %>%
+  ungroup() %>%
+  mutate(libsize = fct_rev(as_factor(libsize)),
+         num_cells = as_factor(num_cells)) %>%
+  ggplot(aes(x=num_cells, y=libsize, fill=m, label = tool)) +
+  geom_tile(width=0.99, height=0.99, size=1) +
+  theme(title = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=14),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_rect(colour = "white", fill="white"),
+        strip.text.x  = element_text(size=14)) +
+  guides(fill = guide_colorbar("AUROC"), color=F) +
+  labs(x="Number of single cells per bulk sample", 
+       y="Mean library size of single cell") +
+  geom_text(color="white") +
+  facet_wrap(~footprints) +
+  scale_fill_gradient(low = rwth_color("petrol25"), 
+                      high = rwth_color("petrol"))
+```
 
 ### In vitro benchmark
 #### Individual performance of all benchmark datasets
@@ -2256,6 +2408,32 @@ paucell_hmap = pheatmap(t(paucell)[pws_ordered, pw_celltype_ordered],fontsize=14
 saveRDS(paucell_hmap, 
         "fig/clustering_analysis/paucell_hmap.rds")
 ```
+
+##### Boxplots of silhouette scores
+```{r}
+cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
+  mutate(hrchy_level = case_when(
+    hrchy_level == "hrchy0" ~ "Hrchy. Lvl. 0",
+    hrchy_level == "hrchy1" ~ "Hrchy. Lvl. 1",
+    hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
+    hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
+    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
+    filter(class == "paucell200" |class == "progeny500" | class == "random_14_seurat_mvg" | class == "top_14_seurat_mvg"| class == "top_2000_seurat_vst") %>%
+  mutate(label = factor(label, levels = c("Seurat (vst)","Pos. control","PROGENy (500)", "P-AUCell (200)", "Neg. control")))
+
+pw_boxplot = cor %>% 
+  filter(hrchy_level == "Hrchy. Lvl. 2") %>%
+  ggplot(aes(x=label, y=m, fill=label)) +
+  geom_jitter(aes(color = label), alpha=0.75) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = rwth_color(c("green", "turquoise","orange", "red", "blue75"))) +
+  scale_fill_manual(values = rwth_color(c("green", "turquoise","orange", "red", "blue75"))) +
+  labs(y="Mean silhouette width", x=NULL) +
+  my_theme()
+```
+
 #### TF activities
 ##### Silhouette correlation plot
 ```{r "silhouette correlation plot"}
@@ -2473,6 +2651,38 @@ activity_greater_expression = df %>%
 saveRDS(activity_greater_expression, 
         "fig/clustering_analysis/activity_greater_expression.rds")
 
+```
+##### Boxplots of silhouette scores
+```{r}
+cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
+  mutate(hrchy_level = case_when(
+    hrchy_level == "hrchy0" ~ "Hrchy. Lvl. 0",
+    hrchy_level == "hrchy1" ~ "Hrchy. Lvl. 1",
+    hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
+    hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
+    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
+  filter(
+    class == "daucellAB" | 
+      class == "viperAB" | 
+      class == "top_113_seurat_mvg" |
+      class == "random_113_seurat_mvg" |
+      class == "tf_genes" |
+      class == "metaviperAB" |
+      class == "top_2000_seurat_vst"
+  ) %>%
+  mutate(label = factor(label, levels = c("Seurat (vst)","Pos. control","DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "TF expression (AB)", "Neg. control")))
+
+tf_boxplot = cor %>% 
+  filter(hrchy_level == "Hrchy. Lvl. 2") %>%
+  ggplot(aes(x=label, y=m, fill=label)) +
+  geom_jitter(aes(color = label), alpha=0.75) +
+  geom_boxplot() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red", "blue75")),drop=F) +
+  scale_color_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red", "blue75")),drop=F) +
+  labs(y="Mean silhouette width", x=NULL) +
+  my_theme()
 ```
 
 
