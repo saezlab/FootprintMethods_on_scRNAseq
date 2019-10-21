@@ -13,7 +13,7 @@ update_path = function(mat = NULL, technology = NULL) {
 
 initialize_scenic_wrapper = function(technology, n_cores = 4,...) {
   scenic_options = initializeScenic(
-    org="hgnc", 
+    org="hgnc",
     datasetTitle = as.character(technology),
     dbDir="data/scenic",
     dbs = c("hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.feather",
@@ -34,13 +34,15 @@ initialize_scenic_wrapper = function(technology, n_cores = 4,...) {
 
 run_scenic = function(expr, scenic_options, ...) {
   
+  message(getDatasetInfo(scenic_options, "datasetTitle"))
+  
   expr = expr %>% as.matrix()
   genesKept <- geneFiltering(expr, scenic_options)
   exprMat_filtered <- expr[genesKept, ]
   runCorrelation(exprMat_filtered, scenic_options)
-  exprMat_filtered_log <- log2(exprMat_filtered+1) 
+  exprMat_filtered_log <- log2(exprMat_filtered+1)
   runGenie3(exprMat_filtered_log, scenic_options)
-  
+
   ### Build and score the GRN
   exprMat_log <- log2(exprMat+1)
   runSCENIC_1_coexNetwork2modules(scenic_options)
@@ -56,17 +58,17 @@ expr_all = readRDS("output/hca_data/expression/raw_preprocessed.rds") %>%
   rename(expr = raw)
 
 # set number of cores
-n_cores = 20
+n_cores = 4
 
 # expr = expr_all %>% pluck(2,1)
 # technology = expr_all %>% pluck(1,1)
 # scenic_options = res %>% pluck(4,1)
 
-expr_all %>%
+y = expr_all %>%
   mutate(n_cores = n_cores) %>%
-  mutate(scenic_options = pmap(., .f = initialize_scenic_wrapper)) %>%
+  transmute(technology, expr, scenic_options = pmap(., .f = initialize_scenic_wrapper)) %>%
   slice(1) %>%
-  mutate(tmp = pmap(., .run_scenic))
+  mutate(tmp = pmap(., .f = run_scenic))
 
 
 
