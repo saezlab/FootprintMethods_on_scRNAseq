@@ -26,6 +26,7 @@ library(RColorBrewer)
 library(ggplotify)
 library(grid)
 library(ggdendro)
+library(lemon)
 
 options("tidylog.display" = list(print))
 theme_set(theme_cowplot())
@@ -34,16 +35,16 @@ source("src/my_ggplot_themes.R")
 ```
 ### Genereal robustness
 #### PROGENy
-##### ROC and PR curves
+##### Global evaluation
 ```{r}
 progeny_performance_global = readRDS("output/general_robustness/progeny_performance.rds") %>%
-    mutate(dropin = fct_recode(dropin, All = "all"),
-           footprints = fct_recode(footprints, All = "all"),
-           tool = "PROGENy")
+  mutate(dropin = fct_recode(dropin, All = "all"),
+         footprints = fct_recode(footprints, All = "all"),
+         tool = "PROGENy")
 
 # gene coverage vs mean auroc for various number of footprints
 gene_cov_vs_auroc_all_footprints = progeny_performance_global %>% 
-  unnest(roc) %>%
+  filter(metric == "roc_auc") %>%
   group_by(dropin, footprints, tool) %>%
   summarise(mean_auc = mean(auc), 
             sd_auc = sd(auc)) %>%
@@ -53,9 +54,8 @@ gene_cov_vs_auroc_all_footprints = progeny_performance_global %>%
   geom_errorbar(aes(ymax = mean_auc + sd_auc, ymin = mean_auc - sd_auc, width=0.5), alpha=.4) +
   geom_hline(yintercept = 0.5, linetype = "dashed") +
   labs(x="Gene coverage", y="AUROC", color = "# Footprint genes per pathway") + 
-  background_grid(major = "xy", minor = "none", size.major = 0.4) +
   theme(legend.position = c(0.1,0.25)) + 
-  my_theme() +
+  my_theme(grid = "y") +
   guides(color = guide_legend(ncol = 3)) +
   scale_color_manual(values = rwth_color(c("turquoise", "maygreen",
                                            "orange","magenta", "yellow", 
@@ -65,16 +65,15 @@ gene_cov_vs_auroc_all_footprints = progeny_performance_global %>%
 saveRDS(gene_cov_vs_auroc_all_footprints, "fig/general_robustness/progeny/gene_cov_vs_auroc_all_footprints.rds")
 
 # correlation of auroc and auprc
-
 auroc = progeny_performance_global %>%
-  unnest(roc) %>%
-  group_by(dropin, footprints, tool) %>%
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, pathway, tool) %>%
   summarise(mean_auroc = mean(auc),
             sd_auroc = sd(auc)) %>%
   ungroup()
 
 auprc = progeny_performance_global %>%
-  unnest(pr) %>%
+  filter(metric == "pr_auc") %>%
   group_by(dropin, footprints, tool) %>%
   summarise(mean_auprc = mean(auc),
             sd_auprc = sd(auc)) %>%
@@ -96,6 +95,73 @@ auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "footprints", "tool")) %
   facet_wrap(~tool)
 
 saveRDS(auroc_vs_auprc, "fig/general_robustness/progeny/auroc_vs_auprc.rds")
+```
+
+##### Pathway-wise evaluation
+```{r}
+progeny_performance_pw = readRDS("output/general_robustness/progeny_performance_pw.rds") %>%
+  mutate(dropin = fct_recode(dropin, All = "all"),
+         footprints = fct_recode(footprints, All = "all"),
+         tool = "PROGENy")
+
+df = readRDS("output/general_robustness/progeny_benchmark_input.rds") %>%
+  count(organism, dropin, footprints, response, run, pathway) 
+
+# gene coverage vs mean auroc for various number of footprints across pathway
+gene_cov_vs_auroc_all_footprints = progeny_performance_pw %>% 
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, pathway, tool) %>%
+  summarise(mean_auc = mean(auc), 
+            sd_auc = sd(auc)) %>%
+  ggplot(aes(x=dropin, y=mean_auc, group=footprints, color=footprints)) +
+  geom_point(size=3) +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean_auc + sd_auc, ymin = mean_auc - sd_auc, width=0.5), alpha=.4) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(x="Gene coverage", y="AUROC", color = "# Footprint genes per pathway") + 
+  theme(legend.position = c(0.775,0.125),
+        axis.text.x = element_text(angle = 45, vjust = 0.5)) + 
+  my_theme(grid = "y") +
+  guides(color = guide_legend(ncol = 3)) +
+  scale_color_manual(values = rwth_color(c("turquoise", "maygreen",
+                                           "orange","magenta", "yellow", 
+                                           "blue"))) +
+  facet_rep_wrap(~pathway)
+
+saveRDS(gene_cov_vs_auroc_all_footprints, "fig/general_robustness/progeny/pw_gene_cov_vs_auroc_all_footprints.rds")
+
+# correlation of auroc and auprc
+
+auroc = progeny_performance_pw %>%
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, tool, pathway) %>%
+  summarise(mean_auroc = mean(auc),
+            sd_auroc = sd(auc)) %>%
+  ungroup()
+
+auprc = progeny_performance_pw %>%
+  filter(metric == "pr_auc") %>%
+  group_by(dropin, footprints, tool, pathway) %>%
+  summarise(mean_auprc = mean(auc),
+            sd_auprc = sd(auc)) %>%
+  ungroup()
+
+auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "footprints", "tool", "pathway")) %>%
+  filter(footprints == 100) %>%
+  ggplot(aes(x=mean_auroc, y=mean_auprc, label=dropin)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auroc - sd_auroc,
+                    xmax = mean_auroc + sd_auroc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = mean_auprc - sd_auprc,
+                    ymax = mean_auprc + sd_auprc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5) +
+  labs(x = "AUROC", y="AUPRC") +
+  my_theme() +
+  facet_wrap(~pathway, scales="free")
+
+saveRDS(auroc_vs_auprc, "fig/general_robustness/progeny/pw_auroc_vs_auprc.rds")
 ```
 
 #### DoRothEA
