@@ -1,5 +1,5 @@
 ---
-title: "Variation of number of footprint genes"
+title: "Script to build the full PROGENy matrix containing 14 pathways"
 author: "Christian Holland"
 date: "05/11/2018"
 output: html_document
