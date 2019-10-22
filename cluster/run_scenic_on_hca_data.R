@@ -44,7 +44,6 @@ run_scenic = function(expr, scenic_options, ...) {
   runGenie3(exprMat_filtered_log, scenic_options)
 
   ### Build and score the GRN
-  exprMat_log <- log2(exprMat+1)
   runSCENIC_1_coexNetwork2modules(scenic_options)
   runSCENIC_2_createRegulons(scenic_options)
   
