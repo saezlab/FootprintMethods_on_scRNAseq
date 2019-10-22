@@ -57,12 +57,12 @@ ggsave("paper/figures/main_general_robustness.png",
        general_robustness_main,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig1_general_robustness.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig1_general_robustness.png",
        general_robustness_main,
        width=10, height=5)
 ```
 
-#### Supp
+#### Supp1
 ```{r}
 progeny_path = "fig/general_robustness/progeny/"
 dorothea_path = "fig/general_robustness/dorothea/"
@@ -82,16 +82,42 @@ mid = plot_grid(mapping_table, labels = c("b"), label_size = 18)
 bottom = plot_grid(
   d_auroc_vs_auprc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("c", "d", "e"), label_size = 18, ncol=3
 )
-general_robustness_supp = plot_grid(top, mid, bottom, ncol=1)
+general_robustness_supp1 = plot_grid(top, mid, bottom, ncol=1)
 
-ggsave("paper/figures/supp_general_robustness.png", 
-       general_robustness_supp,
+ggsave("paper/figures/supp_general_robustness1.png", 
+       general_robustness_supp1,
        width = 12, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS1_general_robustness.png",
-       general_robustness_supp,
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS1_general_robustness.png",
+       general_robustness_supp1,
        width=12, height=12)
 ```
+#### Supp2
+```{r}
+progeny_path = "fig/general_robustness/progeny/"
+gogsea_path = "fig/general_robustness/gogsea/"
+
+p_gene_coverage_vs_auroc = readRDS(str_c(progeny_path, "pw_gene_cov_vs_auroc_all_footprints.rds")) +
+  ylim(0,1)
+
+g_gene_coverage_vs_auroc = readRDS(str_c(gogsea_path, "gene_cov_vs_auroc_pw.rds")) +
+  ylim(0,1)
+
+p_auroc_vs_auprc = readRDS(str_c(progeny_path, "pw_auroc_vs_auprc.rds"))
+g_auroc_vs_auprc = readRDS(str_c(gogsea_path, "auroc_vs_auprc_pw.rds"))
+
+
+general_robustness_supp2 = plot_grid(p_gene_coverage_vs_auroc, g_gene_coverage_vs_auroc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("A", "C", "B", "D"), label_size = 18, align = "hv", axis = "lt")
+
+ggsave("paper/figures/supp_general_robustness2.png", 
+       general_robustness_supp2,
+       width = 25, height = 18)
+
+# ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS1_general_robustness.png",
+#        general_robustness_supp1,
+#        width=12, height=12)
+```
+
 
 ### In silico benchmark
 #### Main
@@ -145,7 +171,7 @@ in_silico_benchmark_main = plot_grid(
 ggsave("paper/figures/main_in_silico_benchmark.png", 
        in_silico_benchmark_main,
        width = 15, height = 15)
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig2_in_silico_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig2_in_silico_benchmark.png",
        in_silico_benchmark_main,
        width=15, height=15)
 ```
@@ -173,7 +199,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_1.png",
        in_silico_benchmark_supp_1,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS2_in_silico_benchmark_1.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS2_in_silico_benchmark_1.png",
        in_silico_benchmark_supp_1,
        width=10, height=5)
 ```
@@ -205,7 +231,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_2.png",
        in_silico_benchmark_supp_2,
        width = 10, height = 15)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS3_in_silico_benchmark_2.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS3_in_silico_benchmark_2.png",
        in_silico_benchmark_supp_2,
        width=10, height=15)
 ```
@@ -239,7 +265,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_3.png",
        in_silico_benchmark_supp_3,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS4_in_silico_benchmark_3.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS4_in_silico_benchmark_3.png",
        in_silico_benchmark_supp_3,
        width=15, height=10)
 ```
@@ -271,7 +297,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_4.png",
        in_silico_benchmark_supp_4,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS5_in_silico_benchmark_4.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS5_in_silico_benchmark_4.png",
        in_silico_benchmark_supp_4,
        width=15, height=10)
 ```
@@ -304,7 +330,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_5.png",
        in_silico_benchmark_supp_5,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS6_in_silico_benchmark_5.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS6_in_silico_benchmark_5.png",
        in_silico_benchmark_supp_5,
        width=15, height=10)
 ```
@@ -327,7 +353,7 @@ in_vitro_benchmark_main = plot_grid(
 ggsave("paper/figures/main_in_vitro_benchmark.png", 
        in_vitro_benchmark_main , width = 10, height=5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig3_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig3_in_vitro_benchmark.png",
        in_vitro_benchmark_main,
        width=10, height=5)
 ```
@@ -380,7 +406,7 @@ in_vitro_benchmark_supp = plot_grid(top, middle, bottom, ncol=1, align="v", axis
 ggsave("paper/figures/supp_in_vitro_benchmark.png", 
        in_vitro_benchmark_supp , width = 14, height=14)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS7_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS7_in_vitro_benchmark.png",
        in_vitro_benchmark_supp,
        width=14, height=14)
 ```
@@ -425,7 +451,7 @@ ggsave("paper/figures/main_clustering_analysis.png",
        clustering_analysis_main,
        width = 14, height = 18)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/Fig4_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig4_clustering_analysis.png",
        clustering_analysis_main,
        width=14, height=18)
 
@@ -445,7 +471,7 @@ ggsave("paper/figures/supp_clustering_analysis_1.png",
        clustering_analysis_supp_1,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS8_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS8_clustering_analysis.png",
        clustering_analysis_supp_1,
        width=10, height=5)
 
@@ -473,7 +499,7 @@ ggsave("paper/figures/supp_clustering_analysis_2.png",
        clustering_analysis_supp_2,
        width = 10, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS9_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS9_clustering_analysis.png",
        clustering_analysis_supp_2,
        width=10, height=12)
 
@@ -498,7 +524,7 @@ ggsave("paper/figures/supp_clustering_analysis_3.png",
        clustering_analysis_supp_3,
        width = 10, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS10_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS10_clustering_analysis.png",
        clustering_analysis_supp_3,
        width=10, height=12)
 ```
@@ -515,7 +541,7 @@ ggsave("paper/figures/supp_clustering_analysis_4.png",
        clustering_analysis_supp_4,
        width = 10, height = 15)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/ReconsiderGenBio/Figures/FigS11_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS11_clustering_analysis.png",
        clustering_analysis_supp_4,
        width=10, height=15)
 
