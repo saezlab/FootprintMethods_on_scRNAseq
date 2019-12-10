@@ -20,12 +20,15 @@ library(cowplot)
 library(ggpubr)
 library(ggrepel)
 library(tidylog)
-library(myutils)
+library(AachenColorPalette) # devtools::install_github("christianholland/AachenColorPalette")
 library(pheatmap)
 library(RColorBrewer)
 library(ggplotify)
 library(grid)
 library(ggdendro)
+library(lemon)
+library(scales)
+library(UpSetR)
 
 options("tidylog.display" = list(print))
 theme_set(theme_cowplot())
@@ -34,16 +37,17 @@ source("src/my_ggplot_themes.R")
 ```
 ### Genereal robustness
 #### PROGENy
-##### ROC and PR curves
+##### Global evaluation
 ```{r}
 progeny_performance_global = readRDS("output/general_robustness/progeny_performance.rds") %>%
-    mutate(dropin = fct_recode(dropin, All = "all"),
-           footprints = fct_recode(footprints, All = "all"),
-           tool = "PROGENy")
+  mutate(dropin = fct_recode(dropin, All = "all"),
+         footprints = fct_recode(footprints, All = "all"),
+         tool = "PROGENy")
+
 
 # gene coverage vs mean auroc for various number of footprints
 gene_cov_vs_auroc_all_footprints = progeny_performance_global %>% 
-  unnest(roc) %>%
+  filter(metric == "roc_auc") %>%
   group_by(dropin, footprints, tool) %>%
   summarise(mean_auc = mean(auc), 
             sd_auc = sd(auc)) %>%
@@ -53,11 +57,10 @@ gene_cov_vs_auroc_all_footprints = progeny_performance_global %>%
   geom_errorbar(aes(ymax = mean_auc + sd_auc, ymin = mean_auc - sd_auc, width=0.5), alpha=.4) +
   geom_hline(yintercept = 0.5, linetype = "dashed") +
   labs(x="Gene coverage", y="AUROC", color = "# Footprint genes per pathway") + 
-  background_grid(major = "xy", minor = "none", size.major = 0.4) +
   theme(legend.position = c(0.1,0.25)) + 
-  my_theme() +
+  my_theme(grid = "y") +
   guides(color = guide_legend(ncol = 3)) +
-  scale_color_manual(values = rwth_color(c("turquoise", "maygreen",
+  scale_color_manual(values = aachen_color(c("turquoise", "maygreen",
                                            "orange","magenta", "yellow", 
                                            "blue"))) +
   facet_wrap(~tool)
@@ -65,16 +68,15 @@ gene_cov_vs_auroc_all_footprints = progeny_performance_global %>%
 saveRDS(gene_cov_vs_auroc_all_footprints, "fig/general_robustness/progeny/gene_cov_vs_auroc_all_footprints.rds")
 
 # correlation of auroc and auprc
-
 auroc = progeny_performance_global %>%
-  unnest(roc) %>%
-  group_by(dropin, footprints, tool) %>%
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, pathway, tool) %>%
   summarise(mean_auroc = mean(auc),
             sd_auroc = sd(auc)) %>%
   ungroup()
 
 auprc = progeny_performance_global %>%
-  unnest(pr) %>%
+  filter(metric == "pr_auc") %>%
   group_by(dropin, footprints, tool) %>%
   summarise(mean_auprc = mean(auc),
             sd_auprc = sd(auc)) %>%
@@ -98,12 +100,78 @@ auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "footprints", "tool")) %
 saveRDS(auroc_vs_auprc, "fig/general_robustness/progeny/auroc_vs_auprc.rds")
 ```
 
+##### Pathway-wise evaluation
+```{r}
+progeny_performance_pw = readRDS("output/general_robustness/progeny_performance_pw.rds") %>%
+  mutate(dropin = fct_recode(dropin, All = "all"),
+         footprints = fct_recode(footprints, All = "all"),
+         tool = "PROGENy")
+
+# gene coverage vs mean auroc for various number of footprints across pathway
+gene_cov_vs_auroc_all_footprints = progeny_performance_pw %>% 
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, pathway, tool) %>%
+  summarise(mean_auc = mean(auc), 
+            sd_auc = sd(auc)) %>%
+  ggplot(aes(x=dropin, y=mean_auc, group=footprints, color=footprints)) +
+  geom_point(size=3) +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean_auc + sd_auc, ymin = mean_auc - sd_auc, width=0.5), alpha=.4) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(x="Gene coverage", y="AUROC", color = "# Footprint genes per pathway") + 
+  theme(legend.position = c(0.775,0.125),
+        axis.text.x = element_text(angle = 45, vjust = 0.5)) + 
+  my_theme(grid = "y") +
+  guides(color = guide_legend(ncol = 3)) +
+  scale_color_manual(values = aachen_color(c("turquoise", "maygreen",
+                                           "orange","magenta", "yellow", 
+                                           "blue"))) +
+  facet_rep_wrap(~pathway)
+
+saveRDS(gene_cov_vs_auroc_all_footprints, "fig/general_robustness/progeny/pw_gene_cov_vs_auroc_all_footprints.rds")
+
+# correlation of auroc and auprc
+
+auroc = progeny_performance_pw %>%
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, footprints, tool, pathway) %>%
+  summarise(mean_auroc = mean(auc),
+            sd_auroc = sd(auc)) %>%
+  ungroup()
+
+auprc = progeny_performance_pw %>%
+  filter(metric == "pr_auc") %>%
+  group_by(dropin, footprints, tool, pathway) %>%
+  summarise(mean_auprc = mean(auc),
+            sd_auprc = sd(auc)) %>%
+  ungroup()
+
+auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "footprints", "tool", "pathway")) %>%
+  filter(footprints == 100) %>%
+  ggplot(aes(x=mean_auroc, y=mean_auprc, label=dropin)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auroc - sd_auroc,
+                    xmax = mean_auroc + sd_auroc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = mean_auprc - sd_auprc,
+                    ymax = mean_auprc + sd_auprc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5) +
+  labs(x = "AUROC", y="AUPRC") +
+  my_theme() +
+  facet_wrap(~pathway, scales="free")
+
+saveRDS(auroc_vs_auprc, "fig/general_robustness/progeny/pw_auroc_vs_auprc.rds")
+```
+
 #### DoRothEA
-##### ROC and PR curves
+##### Global evaluation
 ```{r}
 dorothea_performance_global = readRDS("output/general_robustness/dorothea_performance.rds") %>%
     mutate(dropin = fct_recode(dropin, All = "all"),
            tool = "DoRothEA (AB)")
+
+# colors = colorRampPalette(c(aachen_color(c("petrol", "turquoise"))))
 
 # roc curve
 gene_cov_vs_auroc = dorothea_performance_global %>%
@@ -112,16 +180,18 @@ gene_cov_vs_auroc = dorothea_performance_global %>%
   ggplot(aes(x=dropin, y=auc, fill=dropin)) +
   geom_jitter(aes(color=dropin), alpha=.6, size=3) +
   geom_violin(aes(color=dropin), fill="white") +
-  my_theme() +
+  my_theme(grid = "y") +
   theme(legend.position = "none") +
   geom_hline(yintercept = 0.5, lty=2) + 
   labs(x = "Gene coverage", y="AUROC") +
-  scale_color_manual(values = rwth_color(c("blue", "purple", "violet", "bordeaux", 
-                                           "orange", "green", "turquoise", 
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux",
+                                           "orange", "green", "turquoise",
                                            "petrol"))) +
-  scale_fill_manual(values = rwth_color(c("blue", "purple","violet", "bordeaux", 
-                                          "orange", "green", "turquoise", 
+  scale_fill_manual(values = aachen_color(c("blue", "purple","violet", "bordeaux",
+                                          "orange", "green", "turquoise",
                                           "petrol"))) +
+  # scale_color_manual(values = colors(8)) +
+  # scale_fill_manual(values = colors(8)) +
   facet_wrap(~tool)
 
 saveRDS(gene_cov_vs_auroc, "fig/general_robustness/dorothea/gene_cov_vs_auroc.rds")
@@ -168,42 +238,62 @@ progeny_go_mapping = readRDS("output/general_robustness/progeny_go_mapping.rds")
          "GO term" = geneset,
          "GO ID" = id) %>%
   as.data.frame()
-g = tableGrob(progeny_go_mapping, rows = NULL, theme = ttheme_minimal(base_size=10, core = list(fg_params=list(hjust=0, x=0.01))))
-# plot_grid(g)
 
-g <- gtable_add_grob(g,
-        grobs = rectGrob(gp = gpar(fill = NA, lwd = 2)),
-        t = 2, b = nrow(g), l = 1, r = ncol(g))
-g <- gtable_add_grob(g,
-        grobs = rectGrob(gp = gpar(fill = NA, lwd = 2)),
-        t = 1, l = 1, r = ncol(g))
+tab = progeny_go_mapping %>%
+  gridExtra::tableGrob(rows = NULL, theme = ttheme_minimal(
+    base_size=10, 
+    core=list(
+      bg_params = list(fill=c("white"))
+      ),
+    colhead = list(
+      bg_params = list(fill = c("white"))
+      )
+    )
+    ) %>%
+  gtable::gtable_add_grob(
+    .,
+    grobs = grid::segmentsGrob( # line across the bottom
+      x0 = unit(0,"npc"),
+      y0 = unit(0,"npc"),
+      x1 = unit(1,"npc"),
+      y1 = unit(0,"npc"),
+      gp = gpar(lwd = 3.0)),
+    t = 1, b = 1, l = 1, r = ncol(.)) %>%
+  gtable::gtable_add_grob(
+    .,
+    grobs = grid::segmentsGrob( # line across the bottom
+      x0 = unit(0,"npc"),
+      y0 = unit(0,"npc"),
+      x1 = unit(1,"npc"),
+      y1 = unit(0,"npc"),
+      gp = gpar(lwd = 3.0)),
+    t = nrow(.), b = 1, l = 1, r = ncol(.))
 
-plot_grid(g)
 
-saveRDS(g,"fig/general_robustness/gogsea/progeny_go_mapping.rds")
+saveRDS(tab,"fig/general_robustness/gogsea/progeny_go_mapping.rds")
 ```
 
-##### ROC and PR curves
+##### Global evaluation
 ```{r}
 gogsea_performance_global = readRDS("output/general_robustness/gogsea_performance.rds") %>%
     mutate(dropin = fct_recode(dropin, All = "all"),
            tool = "GO-GSEA")
 
 # gene coverage vs mean auroc for various number of footprints
-gene_cov_vs_auroc = gogsea_performance_global %>% 
-  unnest(roc) %>%
+gene_cov_vs_auroc = gogsea_performance_global %>%
+  filter(metric == "roc_auc") %>%
   distinct(organism, dropin, auc, tool) %>%
   ggplot(aes(x=dropin, y=auc, group = dropin, fill=dropin)) +
   geom_jitter(aes(color=dropin), alpha=.6, size=3) +
   geom_violin(aes(color=dropin), fill="white") +
-  my_theme() +
+  my_theme(grid = "y") +
   theme(legend.position = "none") +
   geom_hline(yintercept = 0.5, lty=2) + 
   labs(x = "Gene coverage", y="AUROC") +
-  scale_color_manual(values = rwth_color(c("blue", "purple", "violet", "bordeaux", 
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", 
                                            "orange", "green", "turquoise", 
                                            "petrol"))) +
-  scale_fill_manual(values = rwth_color(c("blue", "purple","violet", "bordeaux", 
+  scale_fill_manual(values = aachen_color(c("blue", "purple","violet", "bordeaux", 
                                           "orange", "green", "turquoise", 
                                           "petrol"))) +
   facet_wrap(~tool)
@@ -212,14 +302,14 @@ saveRDS(gene_cov_vs_auroc, "fig/general_robustness/gogsea/gene_cov_vs_auroc.rds"
 
 # auroc auprc correation
 auroc = gogsea_performance_global %>%
-  unnest(roc) %>%
+  filter(metric == "roc_auc") %>%
   group_by(dropin, tool) %>%
   summarise(mean_auroc = mean(auc),
             sd_auroc = sd(auc)) %>%
   ungroup()
 
 auprc = gogsea_performance_global %>%
-  unnest(pr) %>%
+  filter(metric == "pr_auc") %>%
   group_by(dropin, tool) %>%
   summarise(mean_auprc = mean(auc),
             sd_auprc = sd(auc)) %>%
@@ -242,6 +332,65 @@ auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "tool")) %>%
 saveRDS(auroc_vs_auprc, "fig/general_robustness/gogsea/auroc_vs_auprc.rds")
 ```
 
+##### Pathway-wise evaluation
+```{r}
+gogsea_performance_pw = readRDS("output/general_robustness/gogsea_performance_pw.rds") %>%
+    mutate(dropin = fct_recode(dropin, All = "all"),
+           tool = "GO-GSEA")
+
+# gene coverage vs mean auroc for various number of footprints
+gene_cov_vs_auroc = gogsea_performance_pw %>%
+  filter(metric == "roc_auc") %>%
+  distinct(organism, dropin, auc, pathway, tool) %>%
+  ggplot(aes(x=dropin, y=auc, group = dropin, fill=dropin)) +
+  geom_jitter(aes(color=dropin), alpha=.6, size=3) +
+  geom_violin(aes(color=dropin), fill="white") +
+  my_theme(grid = "y") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, lty=2) + 
+  labs(x = "Gene coverage", y="AUROC") +
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", 
+                                           "orange", "green", "turquoise", 
+                                           "petrol"))) +
+  scale_fill_manual(values = aachen_color(c("blue", "purple","violet", "bordeaux", 
+                                          "orange", "green", "turquoise", 
+                                          "petrol"))) +
+  facet_rep_wrap(~pathway)
+
+saveRDS(gene_cov_vs_auroc, "fig/general_robustness/gogsea/gene_cov_vs_auroc_pw.rds")
+
+# auroc auprc correation
+auroc = gogsea_performance_pw %>%
+  filter(metric == "roc_auc") %>%
+  group_by(dropin, tool, pathway) %>%
+  summarise(mean_auroc = mean(auc),
+            sd_auroc = sd(auc)) %>%
+  ungroup()
+
+auprc = gogsea_performance_global %>%
+  filter(metric == "pr_auc") %>%
+  group_by(dropin, tool) %>%
+  summarise(mean_auprc = mean(auc),
+            sd_auprc = sd(auc)) %>%
+  ungroup()
+
+auroc_vs_auprc = left_join(auroc, auprc, by=c("dropin", "tool")) %>%
+  ggplot(aes(x=mean_auroc, y=mean_auprc, label=dropin)) +
+  geom_point(size=3) +
+  geom_errorbarh(aes(xmin = mean_auroc - sd_auroc,
+                    xmax = mean_auroc + sd_auroc, height=0), 
+                 show.legend = F) +
+  geom_errorbar(aes(ymin = mean_auprc - sd_auprc,
+                    ymax = mean_auprc + sd_auprc, width=0), 
+                show.legend = F) +
+  geom_label_repel(size=5) +
+  labs(x = "AUROC", y="AUPRC") +
+  my_theme() +
+  facet_rep_wrap(~pathway)
+
+saveRDS(auroc_vs_auprc, "fig/general_robustness/gogsea/auroc_vs_auprc_pw.rds")
+```
 
 ### In silico benchmark
 #### Count distribution of real and simulated single cell
@@ -303,7 +452,7 @@ real_distr = real %>%
   labs(x="log10(Count + 1)", y="Density") +
   ylim(0,11) +
   xlim(0,0.6) +
-  scale_fill_manual(values = rwth_color("red")) +
+  scale_fill_manual(values = aachen_color("red")) +
   theme(legend.position = "none")
 
 sim_distr = sim %>%
@@ -314,7 +463,7 @@ sim_distr = sim %>%
   labs(x="log10(Count + 1)", y="Density") +
   ylim(0,11) +
   xlim(0, 0.6) +
-  scale_fill_manual(values = rwth_color("blue")) +
+  scale_fill_manual(values = aachen_color("blue")) +
   theme(legend.position = "none")
 
 saveRDS(real_distr, "fig/in_silico_benchmark/real_count_distribution.rds")
@@ -360,7 +509,7 @@ mean_vs_var_real = norm %>%
   geom_point(alpha=0.3) +
   labs(x="Mean of normalized counts", y="Variance") +
   my_theme() +
-  scale_color_manual(values = rwth_color("red")) +
+  scale_color_manual(values = aachen_color("red")) +
   theme(legend.position = "none") +
   xlim(0,8) +
   ylim(0,3)
@@ -374,7 +523,7 @@ mean_vs_var_sim = sim_norm %>%
   geom_point(alpha=0.3) +
   labs(x="Mean of normalized counts", y="Variance") +
   my_theme() +
-  scale_color_manual(values = rwth_color("blue")) +
+  scale_color_manual(values = aachen_color("blue")) +
   theme(legend.position = "none") +
   xlim(0,8) +
   ylim(0,3)
@@ -423,7 +572,7 @@ l_real = raw %>%
   labs(x = "Library size", y="# detected genes") +
   my_theme() +
   theme(legend.position = "none") +
-  scale_color_manual(values = rwth_color("red")) +
+  scale_color_manual(values = aachen_color("red")) +
   ylim(c(0,5750)) +
   xlim(c(1000,14000))
 
@@ -438,7 +587,7 @@ l_sim = sim_raw %>%
   labs(x = "Library size", y="# detected genes") +
   my_theme() +
   theme(legend.position = "none") +
-  scale_color_manual(values = rwth_color("blue")) +
+  scale_color_manual(values = aachen_color("blue")) +
   ylim(c(0,5750)) +
   xlim(c(1000,14000))
 
@@ -467,7 +616,7 @@ roc_curve = df %>%
   geom_path(aes(size=type)) +
   geom_abline(linetype = "dashed") +
   my_theme() +
-  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_color_manual(values = aachen_color(c("bordeaux","turquoise"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   scale_size_manual(values = c(1,1.5)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
@@ -503,8 +652,8 @@ auroc_vs_cov = performance_result %>%
   geom_errorbarh(aes(xmin = mean_auc - sd_auc,
                     xmax = mean_auc + sd_auc, height=0), 
                  show.legend = F) +
-  labs(x="AUROC", y="Coverage (# unique TFs)") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  labs(x="AUROC", y="TF coverage (# unique TFs)") +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   lims(x = c(0.5,0.8))
@@ -547,7 +696,7 @@ auroc_vs_auprc = performance_result %>%
                 show.legend = F) +
   geom_label_repel(size=5, show.legend = F) +
   labs(x="AUROC", y="AUPRC") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   ylim(-0.003,NA) +
   my_theme() +
@@ -611,13 +760,13 @@ auroc_distance_hmap = input %>%
         # axis.text.x = element_text(angle = -90),
         axis.line = element_blank(),
         axis.ticks = element_blank())+
-  guides(fill = guide_colorbar("Distance"), color=F) +
+  guides(fill = guide_colorbar("Difference"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell") +
-  scale_fill_gradient2(low = rwth_color("green"),
+  scale_fill_gradient2(low = aachen_color("green"),
                        mid = "white",
-                       high = rwth_color("orange")) +
-  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+                       high = aachen_color("orange")) +
+  scale_color_manual(values = aachen_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=0)
 
 saveRDS(auroc_distance_hmap, 
@@ -648,7 +797,7 @@ variance_hmap = performance_result %>%
        y="Mean library size of single cell",
        title = "DoRothEA") +
   scale_fill_gradient(high = "white", 
-                      low = rwth_color("bordeaux"))
+                      low = aachen_color("bordeaux"))
 
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/dorothea/variance_hmap.rds")
@@ -685,9 +834,9 @@ benchmark_data = performance_result %>%
   gather(key, value, -confidence) %>%
   ggplot(aes(x=key, y=value, fill=confidence)) +
   geom_col() +
-  my_theme() +
+  my_theme(grid = "y") +
   labs(x = NULL, y="Count") +
-  scale_fill_manual(values = rwth_color(c("green", "green75", "green50", 
+  scale_fill_manual(values = aachen_color(c("green", "green75", "green50", 
                                           "green25", "green10"))) +
   theme(legend.position = "top")
 
@@ -714,7 +863,7 @@ roc_curve = df %>%
   geom_path(aes(size=type)) +
   geom_abline(linetype = "dashed") +
   my_theme() +
-  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_color_manual(values = aachen_color(c("bordeaux","turquoise"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   scale_size_manual(values = c(1,1.5)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
@@ -751,8 +900,8 @@ auroc_vs_cov = performance_result %>%
   geom_errorbarh(aes(xmin = mean_auc - sd_auc,
                     xmax = mean_auc + sd_auc, height=0), 
                  show.legend = F) +
-  labs(x="AUROC", y="Coverage (# unique TFs)") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  labs(x="AUROC", y="TF coverage (# unique TFs)") +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   facet_wrap(~tool) +
@@ -796,7 +945,7 @@ auroc_vs_auprc = performance_result %>%
                 show.legend = F) +
   geom_label_repel(size=5, show.legend = F) +
   labs(x="AUROC", y="AUPRC") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   ylim(-0.003,NA) +
   my_theme() +
@@ -860,14 +1009,14 @@ auroc_distance_hmap = input %>%
         # axis.text.x = element_text(angle = -90),
         axis.line = element_blank(),
         axis.ticks = element_blank())+
-  guides(fill = guide_colorbar("Distance"), color=F) +
+  guides(fill = guide_colorbar("Difference"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell",
        title = "metaVIPER") +
-  scale_fill_gradient2(low = rwth_color("green"), 
+  scale_fill_gradient2(low = aachen_color("green"), 
                        mid = "white", 
-                       high = rwth_color("orange")) +
-  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+                       high = aachen_color("orange")) +
+  scale_color_manual(values = aachen_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=0)
 
 saveRDS(auroc_distance_hmap, 
@@ -899,7 +1048,7 @@ variance_hmap = performance_result %>%
        y="Mean library size of single cell",
        title = "metaVIPER") +
   scale_fill_gradient(high = "white", 
-                      low = rwth_color("bordeaux"))
+                      low = aachen_color("bordeaux"))
 
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/metaviper/variance_hmap.rds")
@@ -925,7 +1074,7 @@ roc_curve = df %>%
   geom_path(aes(size=type)) +
   geom_abline(linetype = "dashed") +
   my_theme() +
-  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_color_manual(values = aachen_color(c("bordeaux","turquoise"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   scale_size_manual(values = c(1,1.5)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
@@ -962,8 +1111,8 @@ auroc_vs_cov = performance_result %>%
   geom_errorbarh(aes(xmin = mean_auc - sd_auc,
                     xmax = mean_auc + sd_auc, height=0), 
                  show.legend = F) +
-  labs(x="AUROC", y="Coverage (# unique TFs)") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  labs(x="AUROC", y="TF coverage (# unique TFs)") +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   facet_wrap(~tool) +
@@ -1007,7 +1156,7 @@ auroc_vs_auprc = performance_result %>%
                 show.legend = F) +
   geom_label_repel(size=5, show.legend = F) +
   labs(x="AUROC", y="AUPRC") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   ylim(-0.003,NA) +
   my_theme() +
@@ -1071,14 +1220,14 @@ auroc_distance_hmap = input %>%
         # axis.text.x = element_text(angle = -90),
         axis.line = element_blank(),
         axis.ticks = element_blank())+
-  guides(fill = guide_colorbar("Distance"), color=F) +
+  guides(fill = guide_colorbar("Difference"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell",
        title = "D-AUCell") +
-  scale_fill_gradient2(low = rwth_color("green"), 
+  scale_fill_gradient2(low = aachen_color("green"), 
                        mid = "white", 
-                       high = rwth_color("orange")) +
-  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+                       high = aachen_color("orange")) +
+  scale_color_manual(values = aachen_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=0)
 
 saveRDS(auroc_distance_hmap, 
@@ -1110,7 +1259,7 @@ variance_hmap = performance_result %>%
        y="Mean library size of single cell",
        title = "D-AUCell") +
   scale_fill_gradient(high = "white", 
-                      low = rwth_color("bordeaux"))
+                      low = aachen_color("bordeaux"))
 
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/daucell/variance_hmap.rds")
@@ -1137,7 +1286,7 @@ roc_curve = df %>%
   geom_path(aes(size=type)) +
   geom_abline(linetype = "dashed") +
   my_theme() +
-  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_color_manual(values = aachen_color(c("bordeaux","turquoise"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   scale_size_manual(values = c(1,1.5)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
@@ -1176,7 +1325,7 @@ auroc_vs_footprints = performance_result %>%
   geom_vline(aes(xintercept = random), linetype="dashed") +
   labs(x="AUROC", y="# footprints/genes per pathway") +
   # geom_smooth(method = "lm", se = F, show.legend = F) +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   facet_wrap(~tool) +
@@ -1221,7 +1370,7 @@ auroc_vs_auprc =performance_result %>%
                 show.legend = F) +
   geom_label_repel(size=5, show.legend = F) +
   labs(x="AUROC", y="AUPRC") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   facet_wrap(~tool)
@@ -1286,14 +1435,14 @@ auroc_distance_hmap = input %>%
         axis.line = element_blank(),
         axis.ticks = element_blank()
         ) +
-  guides(fill = guide_colorbar("Distance"), color=F) +
+  guides(fill = guide_colorbar("Difference"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell",
        title = "PROGENy") +
-  scale_fill_gradient2(low = rwth_color("green"), 
+  scale_fill_gradient2(low = aachen_color("green"), 
                        mid = "white", 
-                       high = rwth_color("orange")) +
-  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+                       high = aachen_color("orange")) +
+  scale_color_manual(values = aachen_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=90)
 
 saveRDS(auroc_distance_hmap, 
@@ -1325,7 +1474,7 @@ variance_hmap = performance_result %>%
        y="Mean library size of single cell",
        title = "PROGENy") +
   scale_fill_gradient(high = "white", 
-                      low = rwth_color("bordeaux"))
+                      low = aachen_color("bordeaux"))
 
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/progeny/variance_hmap.rds")
@@ -1353,10 +1502,10 @@ benchmark_data = performance_result %>%
   gather(key, value) %>%
   ggplot(aes(x=key, y=value, fill="0")) +
   geom_col() +
-  my_theme() +
+  my_theme(grid = "y") +
   labs(x = NULL, y="Count") +
   theme(legend.position = "none") +
-  scale_fill_manual(values = rwth_color("black50"))
+  scale_fill_manual(values = aachen_color("black50"))
 
 saveRDS(benchmark_data, 
         "fig/in_silico_benchmark/progeny/benchmark_data.rds")
@@ -1382,7 +1531,7 @@ roc_curve = df %>%
   geom_path(aes(size=type)) +
   geom_abline(linetype = "dashed") +
   my_theme() +
-  scale_color_manual(values = rwth_color(c("bordeaux","turquoise"))) +
+  scale_color_manual(values = aachen_color(c("bordeaux","turquoise"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   scale_size_manual(values = c(1,1.5)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1, size=1))) +
@@ -1420,7 +1569,7 @@ auroc_vs_footprints = performance_result %>%
   geom_vline(aes(xintercept = random), linetype="dashed") +
   labs(x="AUROC", y="# footprints/genes per pathway") +
   # geom_smooth(method = "lm", se = F, show.legend = F) +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position = "top") +
   my_theme() +
   facet_wrap(~tool) +
@@ -1464,7 +1613,7 @@ auroc_vs_auprc =performance_result %>%
                 show.legend = F) +
   geom_label_repel(size=5, show.legend = F) +
   labs(x="AUROC", y="AUPRC") +
-  scale_color_manual(values = rwth_color(c("turquoise", "bordeaux"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "bordeaux"))) +
   theme(legend.position =  "top") +
   my_theme() +
   facet_wrap(~tool)
@@ -1528,14 +1677,14 @@ auroc_distance_hmap = input %>%
         axis.line = element_blank(),
         axis.ticks = element_blank()
         ) +
-  guides(fill = guide_colorbar("Distance"), color=F) +
+  guides(fill = guide_colorbar("Difference"), color=F) +
   labs(x="Number of single cells per bulk sample", 
        y="Mean library size of single cell",
        title = "P-AUCell") +
-  scale_fill_gradient2(low = rwth_color("green"), 
+  scale_fill_gradient2(low = aachen_color("green"), 
                        mid = "white", 
-                       high = rwth_color("orange")) +
-  scale_color_manual(values = rwth_color(c("magenta", "blue"))) +
+                       high = aachen_color("orange")) +
+  scale_color_manual(values = aachen_color(c("magenta", "blue"))) +
   geom_text(data = text_df, aes(label = label), size=4, angle=90)
 
 saveRDS(auroc_distance_hmap, 
@@ -1567,7 +1716,7 @@ variance_hmap = performance_result %>%
        y="Mean library size of single cell",
        title = "P-AUCell") +
   scale_fill_gradient(high = "white", 
-                      low = rwth_color("bordeaux"))
+                      low = aachen_color("bordeaux"))
 
 saveRDS(variance_hmap, 
         "fig/in_silico_benchmark/paucell/variance_hmap.rds")
@@ -1607,7 +1756,7 @@ tf_analysis = performance %>%
                  show.legend = F, alpha=0.3) +
   geom_path() +
   geom_vline(xintercept = 0.5, lty = "dashed") +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  scale_color_manual(values = aachen_color(c("blue", "red", "green"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   facet_wrap(~tool, scales = "free_y") +
   theme(legend.position = "top") +
@@ -1646,8 +1795,8 @@ tf_summary = performance %>%
        y="Mean library size of single cell") +
   geom_text(color="white") +
   facet_wrap(~confidence) +
-  scale_fill_gradient(low = rwth_color("petrol25"), 
-                      high = rwth_color("petrol"))
+  scale_fill_gradient(low = aachen_color("petrol25"), 
+                      high = aachen_color("petrol"))
 ```
 
 ##### Pathway analysis AUROC
@@ -1683,7 +1832,7 @@ pathway_analysis = performance %>%
                     xmax = mean_auc + sd_auc, height=0), 
                  show.legend = F, alpha=0.3) +
   geom_vline(xintercept = 0.5, lty = "dashed") +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  scale_color_manual(values = aachen_color(c("blue", "red", "green"))) +
   scale_alpha_manual(values = c(0.25,1)) +
   facet_wrap(~tool, scales = "free_y") +
   theme(legend.position = "top") +
@@ -1722,8 +1871,8 @@ pathway_summary = performance %>%
        y="Mean library size of single cell") +
   geom_text(color="white") +
   facet_wrap(~footprints) +
-  scale_fill_gradient(low = rwth_color("petrol25"), 
-                      high = rwth_color("petrol"))
+  scale_fill_gradient(low = aachen_color("petrol25"), 
+                      high = aachen_color("petrol"))
 ```
 
 ### In vitro benchmark
@@ -1741,7 +1890,7 @@ performance_result = bind_rows(viper, metaviper, aucell) %>%
                            class == "perturbseq_13" ~ "Perturb-seq (13d)",
                            class == "crispri" ~ "CRISPRi")) %>%
   mutate(class = fct_inorder(class),
-         tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER"))) %>%
+         tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER", "SCENIC"))) %>%
   filter(type == "individual") %>%
   filter(!(confidence %in% c("AB", "ABCD", "ABCDE") & 
              class %in% c("Perturb-seq (7d)", "Perturb-seq (13d)")))
@@ -1764,9 +1913,9 @@ roc_vs_cov_ind = performance_result %>%
   # geom_label_repel(size=5, show.legend = F) +
   geom_label_repel(data = confidence_annotation, color="black", size=3, vjust = "inward", hjust = "inward") +
   theme(legend.position = "top") +
-  my_theme() +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
-  labs(x="AUROC", y="Coverage (# unique perturbed TFs)") +
+  my_theme(grid = "y") +
+  scale_color_manual(values = aachen_color(c("blue", "red", "green", "orange")), drop=F) +
+  labs(x="AUROC", y="TF coverage (# unique perturbed TFs)", color="Tool") +
   xlim(0.425, 0.775)
 
 saveRDS(roc_vs_cov_ind, "fig/in_vitro_benchmark/roc_vs_cov_ind.rds")
@@ -1782,10 +1931,91 @@ roc_vs_pr_ind = performance_result %>%
   # geom_label_repel(size=5, show.legend = F) +
   my_theme() +
   labs(x="AUROC", y="AUPRC") +
-  theme(legend.position = "top") +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green")))
+  theme(legend.position = "top") #+
+  # scale_color_manual(values = aachen_color(c("blue", "red", "green")))
 
 saveRDS(roc_vs_pr_ind, "fig/in_vitro_benchmark/roc_vs_pr_ind.rds")
+```
+
+##### Overlap of SCENIC regulons + DoRothEA + GTEx
+```{r}
+scenic_regulons = readRDS("output/in_vitro_benchmark/scenic/scenic_regulons.rds") %>%
+  unnest() %>%
+  distinct(class, tf) %>%
+  mutate(class = case_when(class == "crispri" ~ "CRISPRi",
+                           class == "perturbseq_7" ~ "Perturb_seq_7d",
+                           class == "perturbseq_13" ~ "Perturb_seq_13d"))
+
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  # filter(confidence %in% c("A", "B")) %>%
+  distinct(tf, confidence) %>%
+  mutate(class = "DoRothEA") %>%
+  select(-confidence)
+
+gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
+  map_dfr(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    tfs = tf_names[,1] 
+    return(tibble(tf = tfs))
+  }) %>%
+  distinct(tf) %>%
+  mutate(class = "GTEx")
+
+# x = bind_rows(scenic_regulons, dorothea, gtex_regulons) %>%
+x = bind_rows(scenic_regulons) %>%
+  mutate(val = 1) %>%
+  spread(class, val, fill=0)
+
+# total overlap only 24 TFs
+x %>%
+  data.frame(row.names=1, check.names = F, stringsAsFactors = F) %>%
+  UpSetR::upset(nsets = 13, nintersects = 500)
+```
+
+
+#### Individual performance of all benchmark datasets subsetted to common tfs
+```{r}
+sub_viper = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_performance_result_sub.rds") %>%
+  mutate(tool = "DoRothEA") %>%
+  filter(confidence == "ABCDE")
+
+sub_metaviper = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_performance_result_sub.rds") %>%
+  mutate(tool = "metaVIPER") %>%
+  filter(confidence == "ABCDE")
+
+sub_aucell = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_performance_result_sub.rds") %>%
+  mutate(tool = "D-AUCell") %>%
+  filter(confidence == "ABCDE")
+
+sub_scenic = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_performance_result_sub.rds") %>%
+  mutate(tool = "SCENIC")
+
+performance_result = bind_rows(sub_viper, sub_metaviper, sub_aucell, sub_scenic) %>%
+  mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
+                           class == "perturbseq_13" ~ "Perturb-seq (13d)",
+                           class == "crispri" ~ "CRISPRi")) %>%
+  mutate(class = fct_inorder(class),
+         tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER","SCENIC"))) %>%
+  filter(type == "individual") %>%
+  mutate(coverage = str_pad(coverage, 2, side = "left", pad = "0")) %>%
+  mutate(coverage = factor(coverage))
+
+roc_vs_cov_ind = performance_result %>%
+  filter(metric == "roc_auc") %>%
+  ggplot(aes(x=auc, y=coverage, color=tool, group = tool)) +
+  geom_point(size=3) +
+  geom_vline(xintercept = 0.5, linetype="dashed") +
+  facet_wrap(~class, scales = "free_y") +
+  # geom_label_repel(size=5, show.legend = F) +
+  theme(legend.position = "top") +
+  my_theme(grid = "y") +
+  scale_color_manual(values = aachen_color(c("blue", "red", "green","orange"))) +
+  labs(x="AUROC", y="TF coverage (# unique perturbed TFs)", color="Tool") +
+  xlim(0.425, 0.775)
+
+saveRDS(roc_vs_cov_ind, "fig/in_vitro_benchmark/roc_vs_cov_ind_sub.rds")
 ```
 
 #### Summarized performance
@@ -1796,13 +2026,15 @@ metaviper = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_performa
   mutate(tool = "metaVIPER")
 aucell = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_performance_result.rds") %>%
   mutate(tool = "D-AUCell")
+scenic = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_performance_result.rds") %>%
+  mutate(tool = "SCENIC")
 
-performance_result = bind_rows(viper, metaviper, aucell) %>%
+performance_result = bind_rows(viper, metaviper, aucell, scenic) %>%
   mutate(class = case_when(class == "perturbseq_7" ~ "Perturb-seq (7d)",
                            class == "perturbseq_13" ~ "Perturb-seq (13d)",
                            class == "crispri" ~ "CRISPRi")) %>%
   mutate(class = fct_inorder(class),
-         tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER"))) %>%
+         tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER", "SCENIC"))) %>%
   filter(type == "sub") 
 
 confidence_annotation = performance_result %>%
@@ -1820,7 +2052,7 @@ roc_vs_cov_sub = performance_result %>%
   # geom_label_repel(size=5, show.legend = F) +
   geom_label(data = confidence_annotation, color="black", size=3, vjust = "inward", hjust = "inward") +
   theme(legend.position = "top") +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green"))) +
+  # scale_color_manual(values = aachen_color(c("blue", "red", "green"))) +
   my_theme() +
   labs(x="AUROC", y="Coverage (# unique perturbed TFs)")
 
@@ -1837,7 +2069,7 @@ roc_vs_pr_sub = performance_result %>%
   my_theme() +
   labs(x="AUROC", y="AUPRC") +
   theme(legend.position = "top") +
-  scale_color_manual(values = rwth_color(c("blue", "red", "green")))
+  scale_color_manual(values = aachen_color(c("blue", "red", "green")))
 
 saveRDS(roc_vs_pr_sub, "fig/in_vitro_benchmark/roc_vs_pr_sub.rds")
 ```
@@ -1853,7 +2085,7 @@ roc_curves = roc_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "1-Specificity", y="Sensitivity") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   facet_wrap(~tool)
 
 saveRDS(roc_curves, "fig/in_vitro_benchmark/viper_roc_curves.rds")
@@ -1869,7 +2101,7 @@ mv_roc_curves = metaviper_roc_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "1-Specificity", y="Sensitivity") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   facet_wrap(~tool)
 
 saveRDS(mv_roc_curves, "fig/in_vitro_benchmark/metaviper_roc_curves.rds")
@@ -1884,7 +2116,7 @@ aucell_roc_curves = aucell_roc_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "1-Specificity", y="Sensitivity") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   facet_wrap(~tool)
 
 saveRDS(aucell_roc_curves, "fig/in_vitro_benchmark/aucell_roc_curves.rds")
@@ -1906,7 +2138,7 @@ viper_pr_curves = viper_pr_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "Recall", y="Precision") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   theme(legend.position = "top") +
   facet_wrap(~tool)
 
@@ -1928,7 +2160,7 @@ metaviper_pr_curves = metaviper_pr_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "Recall", y="Precision") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   theme(legend.position = "top") +
   facet_wrap(~tool)
 
@@ -1950,7 +2182,7 @@ aucell_pr_curves = aucell_pr_coords %>%
   my_theme() +
   theme(legend.position = "top") +
   labs(x= "Recall", y="Precision") +
-  scale_color_manual(values = rwth_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux", "maygreen", "turquoise", "orange"))) +
   theme(legend.position = "top") +
   facet_wrap(~tool)
 
@@ -1959,7 +2191,7 @@ saveRDS(aucell_pr_curves, "fig/in_vitro_benchmark/aucell_pr_curves.rds")
 
 ##### Overview of benchmark
 ```{r}
-dorothea = dorothea_regulon_human_v1 %>%
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
   distinct(target = tf, confidence)
 gmatrix = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
   left_join(dorothea, by="target") %>%
@@ -1979,10 +2211,10 @@ benchmark_data = gmatrix %>%
   gather(key, value, -class, -confidence) %>%
   ggplot(aes(x=key, y=value, fill=confidence)) +
   geom_col() +
-  my_theme() +
-  facet_wrap(~class) +
+  my_theme(grid = "y") +
+  facet_rep_wrap(~class) +
   labs(x = NULL, y="Count") +
-  scale_fill_manual(values = rwth_color(c("green", "green75", "green50", 
+  scale_fill_manual(values = aachen_color(c("green", "green75", "green50", 
                                           "green25", "green10"))) +
   theme(legend.position = "top",
         axis.text.x = element_text(angle=45, hjust = 1))
@@ -2009,7 +2241,7 @@ qc = limma_result %>%
                           TRUE ~ NA_character_)) %>%
   ggplot(aes(x=fct_reorder(contrast, logFC), y= logFC, color=class, label=label)) +
   geom_point() +
-  facet_wrap(~class, scales="free_x") +
+  facet_rep_wrap(~class, scales="free_x") +
   geom_hline(yintercept = 0, linetype = "dashed") +
   theme(axis.text.x = element_blank(),
         axis.ticks.x = element_blank(),
@@ -2020,7 +2252,7 @@ qc = limma_result %>%
   my_theme() +
   scale_x_discrete(breaks = NULL) +
   labs(x = "Perturbation experiment/Contrast", y="logFC of perturbed gene/TF") +
-  scale_color_manual(values = rwth_color(c("violet", "orange", "turquoise")))
+  scale_color_manual(values = aachen_color(c("violet", "orange", "turquoise")))
 
 # numbers of interest
 limma_result %>%
@@ -2053,13 +2285,13 @@ b = a %>%
 
 libsize_num_cells = ggplot(a, aes(x=libsize, y=non_zero_genes, color=class)) +
   geom_point(alpha=0.3) +
-  facet_wrap(~class) +
-  my_theme() +
+  facet_rep_wrap(~class) +
+  my_theme(grid = "y") +
   geom_label(data = b, aes(x=x, y=y, label=n), size=5) +
   theme(axis.text.x = element_text(angle=90, hjust = 1),
         legend.position = "none") +
-  labs(x = "Library size", y="#non-zero genes") +
-  scale_color_manual(values = rwth_color(c("violet", "orange", "turquoise")))
+  labs(x = "Library size", y="# non-zero genes") +
+  scale_color_manual(values = aachen_color(c("violet", "orange", "turquoise")))
 
 saveRDS(libsize_num_cells, "fig/in_vitro_benchmark/libsize_num_cells.rds")
 
@@ -2080,15 +2312,15 @@ h = limma_result %>%
   geom_histogram(color="white", bins=30) +
   facet_wrap(~class, scales="free") +
   labs(x = "logFC", y = "Count") + 
-  my_theme() +
-  scale_fill_manual(values = rwth_color(c("violet", "orange", "turquoise"))) +
+  my_theme(grid = "y") +
+  scale_fill_manual(values = aachen_color(c("violet", "orange", "turquoise"))) +
   theme(legend.position = "none")
 
 saveRDS(h, "fig/in_vitro_benchmark/histogram_of_logfc.rds")
 ```
 
 
-### Clustering analysis
+### HCA analysis
 #### Dendrogram
 ```{r "dendrogram"}
 a = list()
@@ -2106,6 +2338,20 @@ a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes",
               "HEK cells")
 class(a) <- "hclust"
 
+# without HEK cells
+a = list()
+a$merge <- matrix(c(-1,-2,
+                    -3,-4,
+                     1,-5,
+                     2,-6,
+                     3,-7,
+                     4,5), nc=2, byrow=TRUE ) 
+a$height <- c(1,1,2,2,3,4)
+a$order <- 1:7
+a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes",
+              "NK cells","Dendritic cells","B cells")
+class(a) <- "hclust"
+
 dendro =
   ggdendrogram(a, theme_dendro = FALSE) +
   labs(y = "Hrchy. Lvl.", x=NULL) +
@@ -2116,9 +2362,9 @@ dendro =
         title = element_text(size=16),
         axis.text = element_text(size=14),
         legend.text = element_text(size=14)) +
-  geom_hline(yintercept = 2, linetype="dashed", color=rwth_color("red"))
+  geom_hline(yintercept = 2, linetype="dashed", color=aachen_color("red"))
 
-saveRDS(dendro, "fig/clustering_analysis/dendogram.rds")
+saveRDS(dendro, "fig/clustering_analysis/dendogram_wo_hek.rds")
 
 ```
 
@@ -2129,7 +2375,7 @@ saveRDS(dendro, "fig/clustering_analysis/dendogram.rds")
 ```{r "example silhouette"}
 sil_res = readRDS("output/hca_data/umap/silhouette_results.rds")
 df = sil_res %>%
-  filter(technology == "inDrop") %>%
+  filter(technology == "CEL-Seq2") %>%
   filter(class %in% c("normalized_expression", "top_2000_seurat_vst")) %>%
   mutate(class = case_when(class == "normalized_expression" ~ "Full gene expression",
                            class == "top_2000_seurat_vst" ~ "Top 2000 HVGs (Seurat (vst))")) %>%
@@ -2148,7 +2394,7 @@ example_umap = df %>%
         strip.text = element_text(size=14),
         legend.position = "top") +
   facet_wrap(~class, scales="free") +
-  scale_color_manual(values = rwth_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
+  scale_color_manual(values = aachen_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
   guides(color = guide_legend(override.aes = list(size=3))) +
   labs(x = "UMAP1", y="UMAP2")
 
@@ -2159,7 +2405,7 @@ saveRDS(example_sil, "fig/clustering_analysis/example_umap.rds")
 
 sil = readRDS("output/hca_data/umap/silhouette_results.rds")
 sil_df = sil %>%
-  filter(technology == "inDrop") %>%
+  filter(technology == "CEL-Seq2") %>%
   filter(class %in% c("normalized_expression", "top_2000_seurat_vst")) %>%
   mutate(class = case_when(class == "normalized_expression" ~ "Normalized expression",
                            class == "top_2000_seurat_vst" ~ "Seurat (vst)")) %>%
@@ -2193,7 +2439,7 @@ example_sil = sil_df %>%
          cluster = as_factor(cluster)) %>%
   ggplot(aes(x=x, y=sil_width, fill=label)) +
   geom_col() +
-  scale_fill_manual(values = rwth_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
+  scale_fill_manual(values = aachen_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
   my_theme() +
   labs(x=NULL, y="Silhouette width") +
   coord_flip() +
@@ -2212,7 +2458,7 @@ plot_grid(example_umap,
 
 
 
-#### MVG vs full gene expression matrix
+#### MVG vs full gene expression matrix with lines
 ```{r}
 cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
   mutate(hrchy_level = case_when(
@@ -2252,7 +2498,7 @@ expr_cor_plot = expr_cor %>%
   theme(legend.position = "top") +
   my_theme() +
   labs(x="Silhouette width of full gene expression matrix", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("petrol", "green", "orange", "bordeaux", "purple")), drop=F) +
+  scale_color_manual(values = aachen_color(c("petrol", "green", "orange", "bordeaux", "purple")), drop=F) +
   facet_wrap(~hrchy_level,  ncol = 5) +
   theme(axis.line = element_blank()) +
   lims(x = c(-0.1,0.75), y=c(-0.1, 0.75)) +
@@ -2268,71 +2514,147 @@ expr_cor_plot_all_hrchy = expr_cor %>%
   theme(legend.position = "top") +
   my_theme() +
   labs(x="Silhouette width of full gene expression matrix", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("petrol", "green", "orange", "bordeaux", "purple"))) +
+  scale_color_manual(values = aachen_color(c("petrol", "green", "orange", "bordeaux", "purple"))) +
   facet_wrap(~hrchy_level,  ncol = 5) +
   theme(axis.line = element_blank())
 
 saveRDS(expr_cor_plot_all_hrchy, "fig/clustering_analysis/expr_cor_plot_all_hrchy.rds")
 ```
 
-#### Pathway activities
-##### Silhouette correlation plot
-```{r "silhouette correlation plot"}
+#### MVG vs full gene expression matrix with boxplots
+```{r}
+
 cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
   mutate(hrchy_level = case_when(
     hrchy_level == "hrchy0" ~ "Hrchy. Lvl. 0",
     hrchy_level == "hrchy1" ~ "Hrchy. Lvl. 1",
     hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
     hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
-    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4"))
+    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
+  filter(label %in% c("Seurat (vst)", "Seurat (mvp)", "Seurat (disp)", "Normalized expression", "CV", "MVG")) %>%
+  mutate(label = factor(label, levels = rev(c("Normalized expression", "CV", "MVG", "Seurat (mvp)", "Seurat (disp)", "Seurat (vst)"))))
 
-ref = cor %>% 
-  filter(gg == "reference") %>%
-  spread(gg, m) %>%
-  select(-class, -label)
+p_all_hrchy = cor %>% 
+  ggplot(aes(x=label, y=m)) +
+  geom_boxplot(aes(fill = label, color=label)) +
+  geom_jitter(aes(color = label), alpha=0.5, size=3) +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = rev(aachen_color(c("petrol","maygreen","orange", "bordeaux", "turquoise", "violet")))) +
+  scale_color_manual(values = rev(aachen_color(c("petrol","maygreen","orange", "bordeaux", "turquoise", "violet")))) +
+  labs(y="Mean silhouette width", x=NULL) +
+  scale_size_manual(values = c(4,2)) +
+  my_theme(grid = "x") +
+  facet_rep_wrap(~hrchy_level, ncol=5)
 
-case = cor %>% 
-  filter(gg == "case") %>%
-  spread(gg, m)
+# overlay the median with a white line
+dat_all_hrchy = ggplot_build(p_all_hrchy)$data[[1]] %>% 
+  rename(hrchy_level = PANEL) %>%
+  mutate(hrchy_level = case_when(hrchy_level == 1 ~ "Hrchy. Lvl. 0",
+                                  hrchy_level == 2 ~ "Hrchy. Lvl. 1",
+                                  hrchy_level == 3 ~ "Hrchy. Lvl. 2",
+                                  hrchy_level == 4 ~ "Hrchy. Lvl. 3",
+                                  hrchy_level == 5 ~ "Hrchy. Lvl. 4"))
+gex_boxplot_all_hrchy = p_all_hrchy +
+  geom_segment(data = dat_all_hrchy, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.25)
 
-pathway_cor = case %>%
-  left_join(ref, by=c("technology", "hrchy_level")) %>%
-  filter(class == "paucell200" |class == "progeny500" | class == "random_14_seurat_mvg" | class == "top_14_seurat_mvg") %>%
-  mutate(label = factor(label, levels = c("Pos. control","PROGENy (500)", "P-AUCell (200)", "Neg. control")))
-
-pathway_cor_plot = pathway_cor %>%  
-  filter(hrchy_level == "Hrchy. Lvl. 2") %>%
-  ggplot(aes(x=reference, y=case, col=label, group = label, label=technology)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(linetype = "dashed") +
-  geom_smooth(method = "lm", se = F) +
-  geom_hline(yintercept = 0) +
-  geom_vline(xintercept = 0) +
-  theme(legend.position = "top") +
-  my_theme() +
-  labs(x="Silhouette width of expression of highly variable genes", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("green", "turquoise","orange", "red"))) +
-  theme(axis.line = element_blank())
-
-saveRDS(pathway_cor_plot, "fig/clustering_analysis/pathway_cor_plot.rds")
-
-pathway_cor_plot_all_hrchy = pathway_cor %>%  
-  ggplot(aes(x=reference, y=case, col=label, group = label, label=technology)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(linetype = "dashed") +
-  geom_smooth(method = "lm", se = F) +
-  geom_hline(yintercept = 0) +
-  geom_vline(xintercept = 0) +
-  theme(legend.position = "top") +
-  my_theme() +
-  facet_wrap(~hrchy_level,  ncol = 5) +
-  labs(x="Silhouette width of expression of highly variable genes", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("green", "turquoise","orange", "red"))) +
-  theme(axis.line = element_blank())
-  
-saveRDS(pathway_cor_plot_all_hrchy, "fig/clustering_analysis/pathway_cor_plot_all_hrchy.rds")
+saveRDS(gex_boxplot_all_hrchy, "fig/clustering_analysis/gex_boxplot_all_hrchy.rds")
 ```
 
+#### Overlap of SCENIC regulons
+```{r}
+scenic_regulons = readRDS("output/hca_data/scenic/complete/scenic_regulons.rds") %>%
+  unnest(regulons) %>%
+  distinct(technology, tf) %>% 
+  mutate(technology = str_replace(technology, " ", "")) %>%
+  mutate(technology = str_replace(technology, "[- \\(]", "_")) %>%
+  mutate(technology = str_replace(technology, "[\\)]", "")) %>%
+  mutate(val = 1) %>%
+  spread(technology, val, fill=0)
+
+# total overlap only 24 TFs
+mat = scenic_regulons %>%
+  data.frame(row.names=1, check.names = F, stringsAsFactors = F)
+
+i = map(colnames(mat), list) %>%
+  append(list(colnames(mat)))
+
+common_scenic_regulons = upset(mat, nsets = 13, nintersects = NA, sets = colnames(mat), 
+                               text.scale = 2, point.size = 4, 
+                               intersections = i, 
+                               mainbar.y.label = "Common TFs", 
+                               sets.x.label = "Total number of TFs",
+                               queries = list(
+                                 list(
+                                   query = intersects,
+                                   params = colnames(mat),
+                                   color = aachen_color("bordeaux"),
+                                   active = T
+                                   )))
+
+saveRDS(common_scenic_regulons, "fig/clustering_analysis/common_scenic_regulons.rds")
+```
+
+#### Overlap of SCENIC, DoRoThEA and GTEx regulons
+```{r}
+scenic_regulons = readRDS("output/hca_data/scenic/complete/scenic_regulons.rds") %>%
+  unnest(regulons) %>%
+  distinct(technology, tf) %>% 
+  mutate(technology = str_replace(technology, " ", "")) %>%
+  mutate(technology = str_replace(technology, "[- \\(]", "_")) %>%
+  mutate(technology = str_replace(technology, "[\\)]", ""))
+
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  # filter(confidence %in% c("A", "B")) %>%
+  distinct(tf, confidence) %>%
+  mutate(technology = "DoRothEA") %>%
+  select(-confidence)
+
+gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
+  map_dfr(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    tfs = tf_names[,1] 
+    return(tibble(tf = tfs))
+  }) %>%
+  distinct(tf) %>%
+  mutate(technology = "GTEx")
+
+# total overlap only 24 TFs
+mat = bind_rows(scenic_regulons, dorothea, gtex_regulons) %>%
+  mutate(val = 1) %>%
+  spread(technology, val, fill=0) %>%
+  data.frame(row.names=1, check.names = F, stringsAsFactors = F)
+
+i = map(colnames(mat), list) %>%
+  append(list(colnames(mat))) #%>%
+  # append(list(c("DoRothEA", "GTEx")))
+
+common_regulons = upset(mat, nsets = 13, nintersects = NA, sets = colnames(mat), 
+                               text.scale = 2, point.size = 4, 
+                               intersections = i, 
+                               mainbar.y.label = "Common TFs", 
+                               sets.x.label = "Total number of TFs",
+                               queries = list(
+                                 list(
+                                   query = intersects,
+                                   params = colnames(mat),
+                                   color = aachen_color("bordeaux"),
+                                   active = T
+                                   )#,
+                                 # list(
+                                 #   query = intersects,
+                                 #   params = c("DoRothEA", "GTEx"),
+                                 #   color = aachen_color("blue"),
+                                 #   active = T
+                                 ))
+
+saveRDS(common_regulons, "fig/clustering_analysis/common_regulons.rds")
+```
+
+#### Pathway activities
 ##### Silhouette statistics
 ```{r}
 pathway_stats = readRDS("output/hca_data/umap/pathway_stats.rds") %>%
@@ -2342,26 +2664,30 @@ pathway_stats = readRDS("output/hca_data/umap/pathway_stats.rds") %>%
     hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
     hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
     hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
-  unnest(tidy_lm)
+  unnest(tidy_lm) %>%
+  mutate(feature = factor(feature, levels = rev(c(
+    "Seurat (vst)", "PROGENy (500)", "P-AUCell (200)","Neg. control", 
+    "Chromium", "inDrop","C1HT-medium","C1HT-small","CEL-Seq2","ddSEQ",
+    "Drop-Seq","ICELL8","MARS-Seq","Chromium (sn)","SCRB-Seq","Smart-Seq2"))))
 
 pw_stats_plot = pathway_stats %>%
   ggplot(aes(x = feature, y=-log10(p.value), fill = estimate)) +
   geom_col() +
-  facet_grid(group ~ hrchy_level, drop=T, scales = "free_y") +
-  geom_hline(yintercept = -log10(0.05), color = rwth_color("bordeaux"), linetype = "dashed") + 
+  facet_rep_grid(group ~ hrchy_level, drop=T, scales = "free_y") +
+  geom_hline(yintercept = -log10(0.05), color = aachen_color("bordeaux"), linetype = "dashed") + 
   coord_flip() +
-  my_theme() +
-  scale_fill_gradient2(low = muted(rwth_color("violet")), mid = rwth_color("black25"), high = rwth_color("turquoise"), midpoint = 0) +
+  my_theme(grid = "x") +
+  scale_fill_gradient2(low = muted(aachen_color("violet")), mid = aachen_color("black25"), high = aachen_color("turquoise"), midpoint = 0) +
   theme(legend.title = element_text(),
         strip.text.y = element_blank()) +
-  labs(y = "-log10(p-value)", x=NULL, fill = "Estimate")
+  labs(y = expression(-log['10']*"(p-value)"), x=NULL, fill = "Estimate")
 
 saveRDS(pw_stats_plot, "fig/clustering_analysis/pw_stats_plot.rds")
 ```
 
 ##### Celltype specific pathway scores
 ```{r "celltype specific pathway scores"}
-progeny = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+progeny = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool == "progeny" & technology == "Quartz-Seq2" & footprints == "500") %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   select(-tool, -s, -footprints, -confidence) %>%
@@ -2369,7 +2695,7 @@ progeny = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprint
   select(-technology) %>%
   data.frame(row.names = 1, check.names = F, stringsAsFactors = F) 
 
-paucell = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+paucell = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool == "paucell" & technology == "Quartz-Seq2" & footprints == "200") %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   select(-tool, -s, -footprints, -confidence) %>%
@@ -2378,15 +2704,16 @@ paucell = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprint
   data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
 
 paletteLength = 100
-myColor = colorRampPalette(c(rwth_color("orange"), "white", rwth_color("red")))(paletteLength)
+myColor = colorRampPalette(c(aachen_color("orange"), "white", aachen_color("red")))(paletteLength)
 
 
 progenyBreaks = c(seq(min(progeny), 0, length.out=ceiling(paletteLength/2) + 1),
              seq(max(progeny)/paletteLength, max(progeny), length.out=floor(paletteLength/2)))
-progeny_hmap = pheatmap(t(progeny),fontsize=14, fontsize_row = 10, 
+progeny_hmap = pheatmap(t(progeny),fontsize=12, fontsize_row = 10, 
                         color=myColor, breaks = progenyBreaks, 
-                        main = "PROGENy (500)", angle_col = 45,
-                        treeheight_col = 0,  border_color = NA) %>%
+                        main = "PROGENy (500)", angle_col = 90,
+                        treeheight_col = 0,  border_color = NA, 
+                        treeheight_row = 0) %>%
   as.ggplot()
 
 pw_cluster = hclust(dist(t(progeny)))
@@ -2399,9 +2726,9 @@ saveRDS(progeny_hmap,
 
 paucellBreaks = c(seq(min(paucell), 0, length.out=ceiling(paletteLength/2) + 1),
              seq(max(paucell)/paletteLength, max(paucell), length.out=floor(paletteLength/2)))
-paucell_hmap = pheatmap(t(paucell)[pws_ordered, pw_celltype_ordered],fontsize=14, fontsize_row = 10, 
+paucell_hmap = pheatmap(t(paucell)[pws_ordered, pw_celltype_ordered],fontsize=12, fontsize_row = 10, 
                         color=myColor, breaks = paucellBreaks,
-                        main = "P-AUCell (200)", angle_col = 45,cluster_cols = F, cluster_rows = F,
+                        main = "P-AUCell (200)", angle_col = 90,cluster_cols = F, cluster_rows = F,
                         treeheight_col = 0, border_color = NA) %>%
   as.ggplot()
 
@@ -2418,88 +2745,106 @@ cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
     hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
     hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
     hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
-    filter(class == "paucell200" |class == "progeny500" | class == "random_14_seurat_mvg" | class == "top_14_seurat_mvg"| class == "top_2000_seurat_vst") %>%
-  mutate(label = factor(label, levels = c("Seurat (vst)","Pos. control","PROGENy (500)", "P-AUCell (200)", "Neg. control")))
+    filter(class == "paucell200" | class == "progeny500" | class == "random_14_seurat_mvg" | class == "top_14_seurat_mvg"| class == "top_2000_seurat_vst") %>%
+  mutate(label = factor(label, levels = rev(c("Seurat (vst)","Pos. control","Neg. control","PROGENy (500)", "P-AUCell (200)"))))
 
-pw_boxplot = cor %>% 
+p = cor %>% 
   filter(hrchy_level == "Hrchy. Lvl. 2") %>%
-  ggplot(aes(x=label, y=m, fill=label)) +
-  geom_jitter(aes(color = label), alpha=0.75) +
-  geom_boxplot() +
+  ggplot(aes(x=label, y=m)) +
+  geom_boxplot(aes(fill = label, color=label)) +
+  geom_jitter(aes(color = label), alpha=0.5, size=2.5) +
   coord_flip() +
   theme(legend.position = "none") +
-  scale_color_manual(values = rwth_color(c("green", "turquoise","orange", "red", "blue75"))) +
-  scale_fill_manual(values = rwth_color(c("green", "turquoise","orange", "red", "blue75"))) +
+  scale_fill_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol", "purple", "turquoise"))), drop=F) +
+  scale_color_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol", "purple", "turquoise"))), drop=F) +
   labs(y="Mean silhouette width", x=NULL) +
-  my_theme()
+  scale_size_manual(values = c(4,2)) +
+  my_theme(grid = "x") 
+
+# overlay the median with a white line
+dat = ggplot_build(p)$data[[1]] 
+pw_boxplot = p +
+  geom_segment(data = dat, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.25)
+
+
+saveRDS(pw_boxplot, "fig/clustering_analysis/pathway_boxplot.rds")
+
+
+p_all_hrchy = cor %>% 
+  ggplot(aes(x=label, y=m)) +
+  geom_boxplot(aes(fill = label, color=label)) +
+  geom_jitter(aes(color = label), alpha=0.5, size=2.5) +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol", "purple", "turquoise"))), drop=F) +
+  scale_color_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol", "purple", "turquoise"))), drop=F) +
+  labs(y="Mean silhouette width", x=NULL) +
+  scale_size_manual(values = c(4,2)) +
+  my_theme(grid = "x") +
+  facet_rep_wrap(~hrchy_level, ncol=5)
+
+# overlay the median with a white line
+dat_all_hrchy = ggplot_build(p_all_hrchy)$data[[1]] %>% 
+  rename(hrchy_level = PANEL) %>%
+  mutate(hrchy_level = case_when(hrchy_level == 1 ~ "Hrchy. Lvl. 0",
+                                  hrchy_level == 2 ~ "Hrchy. Lvl. 1",
+                                  hrchy_level == 3 ~ "Hrchy. Lvl. 2",
+                                  hrchy_level == 4 ~ "Hrchy. Lvl. 3",
+                                  hrchy_level == 5 ~ "Hrchy. Lvl. 4"))
+pw_boxplot_all_hrchy = p_all_hrchy +
+  geom_segment(data = dat_all_hrchy, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.25)
+
+saveRDS(pw_boxplot_all_hrchy, "fig/clustering_analysis/pathway_boxplot_all_hrchy.rds")
 ```
 
-#### TF activities
-##### Silhouette correlation plot
-```{r "silhouette correlation plot"}
+##### Lineplot of protocols for pathway
+```{r}
 cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
   mutate(hrchy_level = case_when(
     hrchy_level == "hrchy0" ~ "Hrchy. Lvl. 0",
     hrchy_level == "hrchy1" ~ "Hrchy. Lvl. 1",
     hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
     hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
-    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4"))
+    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
+  filter(class == "paucell200" |
+           class == "progeny500" | 
+           # class == "random_14_seurat_mvg" | 
+           # class == "top_14_seurat_mvg" | 
+           class == "top_2000_seurat_vst") %>%
+  mutate(label = factor(label, levels = rev(c("PROGENy (500)", "P-AUCell (200)", "Seurat (vst)"))))
 
-ref = cor %>% 
-  filter(gg == "reference") %>%
-  spread(gg, m) %>%
-  select(-class, -label)
-
-case = cor %>% 
-  filter(gg == "case") %>%
-  spread(gg, m)
-
-tf_cor = case %>%
-  left_join(ref, by=c("technology", "hrchy_level")) %>%
-  filter(
-    class == "daucellAB" | 
-      class == "viperAB" | 
-      class == "top_113_seurat_mvg" |
-      class == "random_113_seurat_mvg" |
-      class == "tf_genes" |
-      class == "metaviperAB"
-  ) %>%
-  mutate(label = factor(label, levels = c("Pos. control","DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "TF expression (AB)", "Neg. control")))
-
-tf_cor_plot = tf_cor %>%  
+protocol_ranking_pw = cor %>% 
   filter(hrchy_level == "Hrchy. Lvl. 2") %>%
-  ggplot(aes(x=reference, y=case, col=label, group = label, label=technology)) +
-  geom_point(alpha=0.5) +
-  #geom_text_repel() +
-  geom_abline(linetype = "dashed") +
-  geom_smooth(method = "lm", se = F) +
-  geom_hline(yintercept = 0) +
-  geom_vline(xintercept = 0) +
-  theme(legend.position = "top") + 
-  my_theme() +
-  labs(x="Silhouette width of expression of highly variable genes", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red")),drop=F) +
-  theme(axis.line = element_blank())
+  group_by(class) %>%
+  mutate(rank = min_rank(m)) %>%
+  ggplot(aes(x=label, y=rank, group=technology, color=technology)) +
+  geom_line(size=1) +
+  my_theme(grid = "y") +
+  scale_y_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12,13), labels = c(13,12,11,10,9,8,7,6,5,4,3,2,1)) +
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", "red", "orange", "maygreen", "green", "turquoise", "petrol", "yellow", "magenta", "black"))) +
+  labs(x=NULL, y="Rank", color = "scRNA-seq protocol")
 
-saveRDS(tf_cor_plot, "fig/clustering_analysis/tf_cor_plot.rds")
+saveRDS(protocol_ranking_pw, "fig/clustering_analysis/protocol_ranking_pw.rds")
 
-tf_cor_plot_all_hrchy = tf_cor %>%  
-  ggplot(aes(x=reference, y=case, col=label, group = label, label=technology)) +
-  geom_point(alpha=0.5) +
-  geom_abline(linetype = "dashed") +
-  geom_smooth(method = "lm", se = F) +
-  geom_hline(yintercept = 0) +
-  geom_vline(xintercept = 0) +
-  theme(legend.position = "top") + 
-  my_theme() +
-  facet_wrap(~hrchy_level,  ncol = 5) +
-  labs(x="Silhouette width of expression of highly variable genes", y = "Silhouette width of ...") +
-  scale_color_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red")),drop=F) +
-  theme(axis.line = element_blank())
+protocol_ranking_pw_all_hrchy = cor %>% 
+  group_by(class, hrchy_level) %>%
+  mutate(rank = min_rank(m)) %>%
+  ggplot(aes(x=label, y=rank, group=technology, color=technology)) +
+  geom_line(size=1) +
+  my_theme(grid = "y") +
+  scale_y_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12,13), labels = c(13,12,11,10,9,8,7,6,5,4,3,2,1)) +
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", "red", "orange", "maygreen", "green", "turquoise", "petrol", "yellow", "magenta", "black"))) +
+  labs(x=NULL, y="Rank", color = "scRNA-seq protocol") +
+  facet_rep_wrap(~hrchy_level, ncol=5) +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
 
-saveRDS(tf_cor_plot_all_hrchy, 
-        "fig/clustering_analysis/tf_cor_plot_all_hrchy.rds")
+saveRDS(protocol_ranking_pw_all_hrchy, "fig/clustering_analysis/protocol_ranking_pw_all_hrchy.rds")
 ```
+
+#### TF activities
+
 
 ##### Silhouette statistics
 ```{r}
@@ -2510,26 +2855,31 @@ tf_stats = readRDS("output/hca_data/umap/tf_stats.rds") %>%
     hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
     hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
     hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
-  unnest(tidy_lm)
+  unnest(tidy_lm) %>%
+  mutate(feature = factor(feature, levels = rev(c(
+    "Seurat (vst)", "DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", 
+    "SCENIC", "TF expression (AB)", "Neg. control", 
+    "Chromium", "inDrop","C1HT-medium","C1HT-small","CEL-Seq2","ddSEQ",
+    "Drop-Seq","ICELL8","MARS-Seq","Chromium (sn)","SCRB-Seq","Smart-Seq2"))))
 
 tf_stats_plot = tf_stats %>%
   ggplot(aes(x = feature, y=-log10(p.value), fill = estimate)) +
   geom_col() +
-  facet_grid(group ~ hrchy_level, drop=T, scales = "free_y") +
-  geom_hline(yintercept = -log10(0.05), color = rwth_color("bordeaux"), linetype = "dashed") + 
+  facet_rep_grid(group ~ hrchy_level, drop=T, scales = "free_y") +
+  geom_hline(yintercept = -log10(0.05), color = aachen_color("bordeaux"), linetype = "dashed") + 
   coord_flip() +
-  my_theme() +
-  scale_fill_gradient2(low = muted(rwth_color("violet")), mid = rwth_color("black25"), high = rwth_color("turquoise"), midpoint = 0) +
+  my_theme(grid = "x") +
+  scale_fill_gradient2(low = muted(aachen_color("violet")), mid = aachen_color("black25"), high = aachen_color("turquoise"), midpoint = 0) +
   theme(legend.title = element_text(),
         strip.text.y = element_blank()) +
-  labs(y = "-log10(p-value)", x=NULL, fill = "Estimate")
+  labs(y = expression(-log['10']*"(p-value)"), x=NULL, fill = "Estimate")
 
 saveRDS(tf_stats_plot, "fig/clustering_analysis/tf_stats_plot.rds")
 ```
 
 ##### Celltype specific TF scores
 ```{r "celltype specific tf scores"}
-highly_variable_tfs = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+highly_variable_tfs = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool %in% c("viper", "metaviper", "daucell") & technology == "Quartz-Seq2" & confidence %in% c("A", "B")) %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   group_by(feature, tool) %>%
@@ -2542,7 +2892,7 @@ highly_variable_tfs = readRDS("output/hca_data/footprint_scores_heatmap/summariz
   reduce(.x = ., .f = dplyr::union)
   
 
-viper = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+viper = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool == "viper" & technology == "Quartz-Seq2" & confidence %in% c("A", "B")) %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   semi_join(highly_variable_tfs) %>%
@@ -2551,7 +2901,7 @@ viper = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_
   select(-technology) %>%
   data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
 
-metaviper = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+metaviper = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool == "metaviper" & technology == "Quartz-Seq2" & confidence %in% c("A", "B")) %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   semi_join(highly_variable_tfs) %>%
@@ -2560,8 +2910,17 @@ metaviper = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footpri
   select(-technology) %>%
   data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
 
-daucell = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds") %>%
+daucell = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
   filter(tool == "daucell" & technology == "Quartz-Seq2" & confidence %in% c("A", "B")) %>%
+  filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
+  semi_join(highly_variable_tfs) %>%
+  select(-tool, -s, -footprints, -confidence) %>%
+  spread(feature, m) %>% 
+  select(-technology) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F) 
+
+scenic = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
+  filter(tool == "scenic" & technology == "Quartz-Seq2") %>%
   filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
   semi_join(highly_variable_tfs) %>%
   select(-tool, -s, -footprints, -confidence) %>%
@@ -2571,7 +2930,7 @@ daucell = readRDS("output/hca_data/footprint_scores_heatmap/summarized_footprint
 
 
 paletteLength = 100
-myColor = colorRampPalette(c(rwth_color("orange"), "white", rwth_color("red")))(paletteLength)
+myColor = colorRampPalette(c(aachen_color("orange"), "white", aachen_color("red")))(paletteLength)
 
 viperBreaks = c(seq(min(viper), 0, length.out=ceiling(paletteLength/2) + 1),
              seq(max(viper)/paletteLength, max(viper), length.out=floor(paletteLength/2)))
@@ -2591,10 +2950,10 @@ saveRDS(viper_hmap,
 
 metaviperBreaks = c(seq(min(metaviper), 0, length.out=ceiling(paletteLength/2) + 1),
              seq(max(metaviper)/paletteLength, max(metaviper), length.out=floor(paletteLength/2)))
-metaviper_hmap = pheatmap(t(metaviper)[tfs_ordered,celltype_ordered], fontsize=14, 
+metaviper_hmap = pheatmap(t(metaviper)[tfs_ordered,celltype_ordered], fontsize=12, 
                           fontsize_row = 8, cluster_rows = F, cluster_cols = F,
                           color=myColor, breaks = metaviperBreaks, 
-                          main = "metaVIPER (AB)", angle_col = 45,
+                          main = "metaVIPER (AB)", angle_col = 90,
                           treeheight_col = 0, border_color = NA) %>%
   as.ggplot()
 
@@ -2603,15 +2962,31 @@ saveRDS(metaviper_hmap,
 
 daucellBreaks = c(seq(min(daucell)-0.0001, 0, length.out=ceiling(paletteLength/2) + 1),
              seq(max(daucell)/paletteLength, max(daucell), length.out=floor(paletteLength/2)))
-daucell_hmap = pheatmap(t(daucell)[tfs_ordered,celltype_ordered], fontsize=14, 
+daucell_hmap = pheatmap(t(daucell)[tfs_ordered,celltype_ordered], fontsize=12, 
                         fontsize_row = 8, cluster_rows = F,cluster_cols = F,
                         color=myColor, breaks = daucellBreaks, 
-                        main = "D-AUCell (AB)", angle_col = 45,
+                        main = "D-AUCell (AB)", angle_col = 90,
                         treeheight_col = 0, border_color = NA) %>%
   as.ggplot()
 
 saveRDS(daucell_hmap, 
         "fig/clustering_analysis/daucell_hmap.rds")
+
+
+
+scenicBreaks = c(seq(min(scenic)-0.0001, 0, length.out=ceiling(paletteLength/2) + 1),
+             seq(max(scenic)/paletteLength, max(scenic), length.out=floor(paletteLength/2)))
+scenic_hmap = pheatmap(t(scenic)[,celltype_ordered], fontsize=12, 
+                        fontsize_row = 8, cluster_rows = F,cluster_cols = F,
+                        color=myColor, breaks = scenicBreaks, 
+                        main = "SCENIC", angle_col = 90,
+                        treeheight_col = 0, border_color = NA) %>%
+  as.ggplot()
+
+saveRDS(scenic_hmap, 
+        "fig/clustering_analysis/scenic_hmap.rds")
+
+
 ```
 ##### Example UMAP: TF activity > TF expression
 ```{r "example umap: viper > norm expression"}
@@ -2620,15 +2995,12 @@ df = sil_res %>%
   # filter(technology == "Drop-Seq") %>%
   # filter(technology == "inDrop") %>%
   filter(technology == "Smart-Seq2") %>%
+  # filter(technology == "CEL-Seq2") %>%
   filter(class %in% c("tf_genes", "viperAB")) %>%
   mutate(class = case_when(class == "tf_genes" ~ "TF expression",
                            class == "viperAB" ~ "TF activities")) %>%
   unnest(coords)
 
-min_df = df %>%
-  group_by(class) %>%
-  summarise(min_x = min(x),
-            min_y = min(y))
 
 
 activity_greater_expression = df %>%
@@ -2644,9 +3016,9 @@ activity_greater_expression = df %>%
         strip.text = element_text(size=14),
         legend.position = "top") +
   facet_wrap(~class, scales="free") +
-  scale_color_manual(values = rwth_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
+  scale_color_manual(values = aachen_color(c("orange", "bordeaux", "maygreen",  "turquoise"))) +
   guides(color = guide_legend(override.aes = list(size=3))) +
-  labs(x = "UMAP1", y="UMAP2")
+  labs(x = expression(UMAP['1']),y = expression(UMAP['2']))
 
 saveRDS(activity_greater_expression, 
         "fig/clustering_analysis/activity_greater_expression.rds")
@@ -2668,21 +3040,233 @@ cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
       class == "random_113_seurat_mvg" |
       class == "tf_genes" |
       class == "metaviperAB" |
-      class == "top_2000_seurat_vst"
+      class == "top_2000_seurat_vst" |
+      class == "scenic" 
   ) %>%
-  mutate(label = factor(label, levels = c("Seurat (vst)","Pos. control","DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "TF expression (AB)", "Neg. control")))
+  mutate(label = factor(label, levels = rev(c("Seurat (vst)","Pos. control", "Neg. control","TF expression (AB)","DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "SCENIC"))))
 
-tf_boxplot = cor %>% 
+p = cor %>% 
   filter(hrchy_level == "Hrchy. Lvl. 2") %>%
-  ggplot(aes(x=label, y=m, fill=label)) +
-  geom_jitter(aes(color = label), alpha=0.75) +
-  geom_boxplot() +
+  ggplot(aes(x=label, y=m)) +
+  geom_boxplot(aes(fill = label, color=label)) +
+  geom_jitter(aes(color = label), alpha=0.5, size=2.5) +
   coord_flip() +
   theme(legend.position = "none") +
-  scale_fill_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red", "blue75")),drop=F) +
-  scale_color_manual(values = rwth_color(c("green", "orange", "bordeaux", "petrol", "turquoise", "red", "blue75")),drop=F) +
+  scale_fill_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol","violet","blue","red","green","orange"))), drop=F) +
+  scale_color_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol","violet","blue","red","green","orange"))), drop=F) +
   labs(y="Mean silhouette width", x=NULL) +
-  my_theme()
+  scale_size_manual(values = c(4,2)) +
+  my_theme(grid = "x") +
+  geom_vline(xintercept = 1.5, lty = "dashed", size=1.25, color=aachen_color("black50"))
+
+# overlay the median with a white line
+dat = ggplot_build(p)$data[[1]]
+tf_boxplot = p +
+  geom_segment(data = dat, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.5)
+
+saveRDS(tf_boxplot, "fig/clustering_analysis/tf_boxplot.rds")
+
+
+p_all_hrchy = cor %>% 
+  ggplot(aes(x=label, y=m)) +
+  geom_boxplot(aes(fill = label, color=label)) +
+  geom_jitter(aes(color = label), alpha=0.5, size=2.5) +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol","violet","blue","red","green","orange"))), drop=F) +
+  scale_color_manual(values = rev(aachen_color(c("maygreen","bordeaux","petrol","violet","blue","red","green","orange"))), drop=F) +
+  labs(y="Mean silhouette width", x=NULL) +
+  scale_size_manual(values = c(4,2)) +
+  my_theme(grid = "x") +
+  facet_rep_wrap(~hrchy_level, ncol=5) +
+  geom_vline(xintercept = 1.5, lty = "dashed", size=1, color=aachen_color("black50"))
+
+# overlay the median with a white line
+dat_all_hrchy = ggplot_build(p_all_hrchy)$data[[1]] %>% 
+  rename(hrchy_level = PANEL) %>%
+  mutate(hrchy_level = case_when(hrchy_level == 1 ~ "Hrchy. Lvl. 0",
+                                  hrchy_level == 2 ~ "Hrchy. Lvl. 1",
+                                  hrchy_level == 3 ~ "Hrchy. Lvl. 2",
+                                  hrchy_level == 4 ~ "Hrchy. Lvl. 3",
+                                  hrchy_level == 5 ~ "Hrchy. Lvl. 4"))
+tf_boxplot_all_hrchy = p_all_hrchy +
+  geom_segment(data = dat_all_hrchy, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.25)
+
+saveRDS(tf_boxplot_all_hrchy, "fig/clustering_analysis/tf_boxplot_all_hrchy.rds")
 ```
 
+##### Lineplot of protocols for TFs
+```{r}
+cor = readRDS("output/hca_data/umap/sil_correlation_input.rds") %>%
+  mutate(hrchy_level = case_when(
+    hrchy_level == "hrchy0" ~ "Hrchy. Lvl. 0",
+    hrchy_level == "hrchy1" ~ "Hrchy. Lvl. 1",
+    hrchy_level == "hrchy2" ~ "Hrchy. Lvl. 2",
+    hrchy_level == "hrchy3" ~ "Hrchy. Lvl. 3",
+    hrchy_level == "hrchy4" ~ "Hrchy. Lvl. 4")) %>%
+  filter(
+    class == "daucellAB" | 
+      class == "viperAB" | 
+      # class == "top_113_seurat_mvg" |
+      # class == "random_113_seurat_mvg" |
+      # class == "tf_genes" |
+      class == "metaviperAB" |
+      class == "top_2000_seurat_vst" |
+      class == "scenic" 
+      # class == "rand_scenic"
+  ) %>%
+  mutate(label = factor(label, levels = rev(c("metaVIPER (AB)", "D-AUCell (AB)", "DoRothEA (AB)", "SCENIC", "Seurat (vst)"))))
+  # mutate(label = factor(label, levels = rev(c("Seurat (vst)","Pos. control", "Neg. control","TF expression (AB)","DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "SCENIC", "Randomized SCENIC"))))
+
+protocol_ranking_tf = cor %>% 
+  filter(hrchy_level == "Hrchy. Lvl. 2") %>%
+  group_by(class) %>%
+  mutate(rank = min_rank(m)) %>%
+  ggplot(aes(x=label, y=rank, group=technology, color=technology)) +
+  geom_line(size=1) +
+  my_theme(grid = "y") +
+  scale_y_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12,13), labels = c(13,12,11,10,9,8,7,6,5,4,3,2,1)) +
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", "red", "orange", "maygreen", "green", "turquoise", "petrol", "yellow", "magenta", "black"))) +
+  labs(x=NULL, y="Rank", color = "scRNA-seq protocol")
+
+saveRDS(protocol_ranking_tf, "fig/clustering_analysis/protocol_ranking_tf.rds")
+
+protocol_ranking_tf_all_hrchy = cor %>% 
+  group_by(class, hrchy_level) %>%
+  mutate(rank = min_rank(m)) %>%
+  ggplot(aes(x=label, y=rank, group=technology, color=technology)) +
+  geom_line(size=1) +
+  my_theme(grid = "y") +
+  scale_y_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12,13), labels = c(13,12,11,10,9,8,7,6,5,4,3,2,1)) +
+  scale_color_manual(values = aachen_color(c("blue", "purple", "violet", "bordeaux", "red", "orange", "maygreen", "green", "turquoise", "petrol", "yellow", "magenta", "black"))) +
+  labs(x=NULL, y="Rank", color = "scRNA-seq protocol") +
+  facet_rep_wrap(~hrchy_level, ncol=5) +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+saveRDS(protocol_ranking_tf_all_hrchy, "fig/clustering_analysis/protocol_ranking_tf_all_hrchy.rds")
+```
+
+##### TF correlations
+```{r}
+cor_res = readRDS("output/hca_data/tf_correlation_high_conf.rds") %>%
+  mutate(tool = case_when(
+    tool == "daucell" ~ "D-AUCell (AB)",
+    tool == "metaviper" ~ "metaVIPER (AB)",
+    tool == "scenic" ~ "SCENIC",
+    tool == "viper" ~ "DoRothEA (AB)"
+  )) %>%
+  mutate(tool = factor(tool, levels = c("DoRothEA (AB)", "D-AUCell (AB)", "metaVIPER (AB)", "SCENIC")))
+
+cor_res %>% 
+  unnest(cor_df) %>%
+  # filter(is.na(`C1HT-medium`))
+  ggplot(aes(x=`C1HT-medium`, y = `C1HT-small`)) +
+  geom_point() +
+  my_theme() +
+  facet_rep_wrap(~tool)
+
+tf_cor = cor_res %>%
+  unnest(r) %>%
+  ggplot(aes(x=r, stat(density), color=tool)) +
+  geom_density(size=1.5) + 
+  geom_histogram(aes(fill = tool), alpha=0.25, col = "white", position="identity", binwidth = 0.05) +
+  scale_color_manual(values = aachen_color(c("blue", "red", "green", "orange"))) +
+  scale_fill_manual(values = aachen_color(c("blue", "red", "green", "orange"))) +
+  my_theme(grid = "y") +
+  labs(x = expression("Correlation coefficient" ~italic("r")), y="Density", fill = "Tool", color="Tool") +
+  theme(legend.position = "top")
+
+saveRDS(tf_cor, "fig/clustering_analysis/tf_cor.rds")
+```
+
+##### Activity vs Essentiality
+```{r}
+a = read_csv("output/hca_data/blood_cancer/tf_activities.csv")
+e = read_csv("output/hca_data/blood_cancer/tf_essentialities.csv")
+tf_of_interest = "SPI1"
+
+# activity boxplot
+p_a = a %>%
+  filter(technology == "Smart-Seq2" & tool == "viper" & feature == tf_of_interest) %>%
+  ggplot(aes(x=MorL, y=m)) + 
+  geom_boxplot(aes(fill = MorL, color=MorL)) +
+  my_theme(grid = "y") +
+  labs(x="PBMC lineage",y="TF activity") +
+  scale_fill_manual(values = aachen_color(c("turquoise", "violet"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "violet"))) +
+  theme(legend.position = "none") +
+  stat_compare_means(comparisons = list(c("Lymphoid", "Myeloid")), label = "p.format")
+
+# overlay the median with a white line
+dat_a = ggplot_build(p_a)$data[[1]]
+activity_boxplot = p_a +
+  geom_segment(data = dat_a, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.5)
+
+saveRDS(activity_boxplot, "fig/clustering_analysis/activity_boxplot.rds")
+
+
+# essentiality boxplot
+p_e = e %>%
+  filter(feature == tf_of_interest) %>%
+  ggplot(aes(x = MorL, essentiality)) + 
+  geom_boxplot(aes(fill = MorL, color=MorL)) +
+  my_theme(grid = "y") +
+  labs(x="Blood cancer lineage",y="Gene essentiality") +
+  scale_fill_manual(values = aachen_color(c("turquoise", "violet"))) +
+  scale_color_manual(values = aachen_color(c("turquoise", "violet"))) +
+  theme(legend.position = "none") +
+  stat_compare_means(comparisons = list(c("Lymphoid", "Myeloid")))
+
+# overlay the median with a white line
+dat_e = ggplot_build(p_e)$data[[1]]
+essentiality_boxplot = p_e +
+  geom_segment(data = dat_e, aes(x = xmin, xend = xmax,
+                               y = middle, yend = middle), color="white", size=1.5)
+
+saveRDS(essentiality_boxplot, "fig/clustering_analysis/essentiality_boxplot.rds")
+
+```
+
+##### Difference in effect size between activity and essentiality
+```{r}
+df = readRDS("output/hca_data/blood_cancer/effect_size_diff.rds") %>%
+  mutate(tool = case_when(
+    tool == "daucell" ~ "D-AUCell",
+    tool == "metaviper" ~ "metaVIPER",
+    tool == "scenic" ~ "SCENIC",
+    tool == "viper" ~ "DoRothEA"
+  )) %>%
+  mutate(tool = factor(tool, levels = c("DoRothEA", "D-AUCell", "metaVIPER", "SCENIC")))
+
+violins = df %>%
+  unnest(r) %>%
+  ggplot(aes(x=fct_reorder(tool, estimate, .fun = median), y=estimate)) +
+  geom_violin(aes(fill = tool), draw_quantiles = c(0.5), color="white", size=1.5, show.legend = F) +
+  geom_jitter(aes(color=-log10(p.value))) +
+  scale_color_gradient(low = aachen_color("violet10"), high = aachen_color("violet")) +
+  scale_fill_manual(values = aachen_color(c("blue", "red", "green", "orange"))) +
+  labs(x=NULL, y = expression("Correlation coefficient" ~italic("r")), color = expression(-log['10']*"(p-value)")) +
+  theme(legend.position = "top") +
+  my_theme(grid = "y")
+
+saveRDS(violins, "fig/clustering_analysis/activity_essentiality_cor.rds")
+
+# correlation plot of a selected technology and tool
+tech = "Quartz-Seq2"
+tool = "DoRothEA"
+conf = c("A", "B")
+
+df %>%
+  unnest(data) %>%
+  filter(technology == {{tech}} & tool == {{tool}} & (confidence %in% {{conf}} | is.na({{conf}}))) %>%
+  ggplot(aes(x=diff_activity, y=diff_ess)) +
+  geom_point(size=2.5) +
+  labs(x=str_wrap("PBMC activity effect size (Lymphoid - Myeloid)", width=25),
+       y = str_wrap("Blood cancer essentiality effect size (Lymphoid - Myeloid)", width=37)) +
+  my_theme() +
+  geom_smooth(method = "lm")
+```
 

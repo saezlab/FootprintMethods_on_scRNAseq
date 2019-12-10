@@ -5,5 +5,6 @@
 
 data/
 output/
-.Rproj
+fig/
+analyses/*misc*
 

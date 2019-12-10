@@ -19,7 +19,6 @@ library(GSEABase)
 library(tidyverse)
 library(furrr)
 library(yardstick)
-library(myutils)
 library(readxl)
 library(Matrix)
 library(cowplot)
@@ -32,19 +31,19 @@ library(biobroom)
 library(ggrepel)
 library(AUCell)
 library(viper)
-library(cowplot)
 
 plan(multiprocess, workers=4)
 
 theme_set(theme_cowplot())
 options("tidylog.display" = list(print))
+source("src/dorothea_analysis.R")
 source("src/my_ggplot_themes.R")
 ```
 
 ### Processing step
 #### Process guide matrices
 ```{r "process guide matrices}
-# load guide matrices from perturbseq
+# load guide matrices from perturbseq and clean the files
 pre_gmatrix_perturbseq = list.files("data/in_vitro_benchmark/perturbseq", full.names = T, recursive = T, pattern = "guide_matrix") %>%
   map_df(function(path) {
     get(load(path)) %>%
@@ -59,6 +58,7 @@ pre_gmatrix_perturbseq = list.files("data/in_vitro_benchmark/perturbseq", full.n
              series = "perturbseq")
   })
 
+# extract guideRNA and target
 tmp_gmatrix_perturbseq = pre_gmatrix_perturbseq %>%
   pull(guide) %>%
   str_match(., "(p_sg(.*)_([0-9]*))") %>%
@@ -69,6 +69,7 @@ tmp_gmatrix_perturbseq = pre_gmatrix_perturbseq %>%
   distinct() %>%
   left_join(pre_gmatrix_perturbseq, by="guide")
   
+
 gmatrix_perturbseq = anti_join(pre_gmatrix_perturbseq,tmp_gmatrix_perturbseq, by=c("guide")) %>%
   filter(str_detect(guide, "INTERGEN")) %>%
   group_by(guide, day) %>%
@@ -142,10 +143,6 @@ design = gmatrix %>%
 
 saveRDS(design, "output/in_vitro_benchmark/meta/design_df.rds")
 
-p_design_13 = design %>% dplyr::slice(1) %>% pluck(4,1)
-p_design_7 = design %>% dplyr::slice(2) %>% pluck(4,1)
-c_design = design %>% dplyr::slice(3) %>% pluck(4,1)
-
 # define contrasts
 contrast_df = gmatrix %>%
   filter(!str_detect(group, "control")) %>%
@@ -173,6 +170,7 @@ contrast_df = gmatrix %>%
 
 saveRDS(contrast_df, "output/in_vitro_benchmark/meta/contrasts.rds")
 ```
+
 #### Process count matrices
 ```{r "process count matrices}
 gmatrix = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds")
@@ -187,9 +185,11 @@ perturbseq = list.files(
     
     # load file
     df = get(load(path))
+    # extract hgnc symbol from column names
     colnames(df) = str_split(colnames(df), pattern="_") %>% 
       map(pluck(2)) %>% 
       flatten_chr() 
+    
     mat = df[keep_cells,] %>% 
       t() %>%
       Matrix(sparse=T)
@@ -208,7 +208,7 @@ crispri = list.files("data/in_vitro_benchmark/crispri", full.names = T, recursiv
   }) %>%
   pluck(1)
 
-
+# combine matrices from perturb-seq and crispri
 setup = tribble(
   ~series, ~day, ~class,
   "perturbseq", 13, "perturbseq_13",
@@ -226,7 +226,6 @@ saveRDS(setup, "output/in_vitro_benchmark/expr/count_matrices.rds")
 #### Explore relationship between library size and number of detected genes
 ```{r "explore relationship between library size and number of detected genes"}
 count_matrices = readRDS("output/in_vitro_benchmark/expr/count_matrices.rds")
-raw_counts = count_matrices[1,4] %>% pluck(1,1)
 
 # scatter plot num_cells ~ library size
 rel = count_matrices %>%
@@ -271,9 +270,7 @@ d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
   mutate(day = as.numeric(day))
 
 setup = purrr::reduce(list(expr, c, d), .f = left_join, by=c("series", "day", "class"))
-# norm_expr = setup %>% dplyr::slice(1) %>% pluck(4,1)
-# contrast = setup %>% dplyr::slice(1) %>% pluck(5,1)
-# design = setup %>% dplyr::slice(1) %>% pluck(6,1)
+
 limma_result = setup %>%
   transmute(series, day, class, limma_result = pmap(., .f = function(norm_expr, contrast, design, ...) {
     stopifnot(colnames(norm_expr) == rownames(design))
@@ -302,33 +299,50 @@ bad_experiments = limma_result %>%
 saveRDS(bad_experiments, "output/in_vitro_benchmark/expr/bad_experiments.rds")
 ```
 
-### Single sample anlysis
-#### Run Viper on contrasts
-```{r "run viper on contrasts}
-limma_result = readRDS("output/in_vitro_benchmark/expr/limma_result.rds")
+### Compare DoRothEA with GTEx regulons to find common TFs
+```{r "compare dorothea with gtex regulons to find common tfs"}
+gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
+  map(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    return(tissue_regulon)
+  }) %>%
+  map(names) %>% 
+  unlist() %>% 
+  unique() %>% 
+  enframe(name = NULL, value = "tf")
 
-dorothea = dorothea_regulon_human_v1
 
-viper_result = limma_result %>%
-  transmute(series, day, class,
-            viper_result = limma_result %>% map(function(l) {
-              run_viper(E = l, 
-                        regulon = dorothea, 
-                        value_name = "logFC", 
-                        id_name = "contrast")
-              }))
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf)
 
-saveRDS(viper_result, "output/in_vitro_benchmark/expr/viper_result.rds")
+guides = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
+  distinct(target) %>%
+  rename(tf = target)
+
+sub_g_dorothea = dorothea %>%
+  semi_join(guides) 
+
+sub_g_gtex = gtex_regulons %>%
+  semi_join(guides)
+
+# those tfs are in dorothea but not in gtex -> need to be removed for in vitro benchmark
+anti_join(sub_g_dorothea, sub_g_gtex) %>%
+  saveRDS("output/in_vitro_benchmark/meta/missing_tfs_dorothea_vs_gtex.rds")
+anti_join(sub_g_gtex, sub_g_dorothea)
 ```
 
-#### Run VIPER on single samples
-```{r}
+### Single sample anlysis
+
+#### Run VIPER
+```{r "run viper"}
 # only for those tfs there are perturbation experiments
 target_tfs = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
   rename(tf = target) %>%
   distinct(tf)
 
-# we need to remove this tf as it is not available in gtex regulons
+# we need to remove these tfs as they are not available in gtex regulons
 missing_tfs = readRDS("output/in_vitro_benchmark/meta/missing_tfs_dorothea_vs_gtex.rds")
 
 # subset dorothea
@@ -337,10 +351,11 @@ human_dorothea_viper_format = read_csv("data/regulons/dorothea/dorothea_regulon_
   anti_join(missing_tfs, by="tf") %>%
   df2regulon()
 
+# load normalized expression
 norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
 
-# norm_expr = norm_expr_df %>% slice(1) %>% pluck(4,1)
 
+# run vuper
 ss_viper_result = norm_expr_df %>%
   mutate(ss_viper_result = norm_expr %>% map(
     ~viper(eset = as.matrix(.x),
@@ -349,11 +364,11 @@ ss_viper_result = norm_expr_df %>%
            adaptive.size = F, cores = 4))) %>%
   select(-norm_expr)
 
+# save intermediate result
 saveRDS(ss_viper_result, "output/in_vitro_benchmark/ss_analysis/ss_viper_scores.rds")
 
 
-####
-##### make contrast
+# Build contrasts on TF activity level
 human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
   distinct(tf, confidence)
 ss_viper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_scores.rds") %>%
@@ -364,9 +379,6 @@ d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
   mutate(day = as.numeric(day))
 
 setup = purrr::reduce(list(ss_viper_result, c, d), .f = left_join, by=c("series", "day", "class"))
-# ss_viper_result = setup %>% dplyr::slice(1) %>% pluck(4,1)
-# contrast = setup %>% dplyr::slice(1) %>% pluck(5,1)
-# design = setup %>% dplyr::slice(1) %>% pluck(6,1)
 
 ss_viper_contrasts = setup %>%
   transmute(series, day, class, ss_viper_contrast = pmap(., .f = function(ss_viper_result, contrast, design, ...) {
@@ -383,20 +395,23 @@ ss_viper_contrasts = setup %>%
   left_join(human_dorothea, by="tf") %>%
   nest(-series,-day, -class, .key = "ss_viper_contrast")
   
+
+
 saveRDS(ss_viper_contrasts, "output/in_vitro_benchmark/ss_analysis/ss_viper_contrast.rds")
 ```
 
 #### Run metaVIPER on single samples
-```{r}
+```{r "run metaviper"}
 # only for those tfs there are perturbation experiments
 target_tfs = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
   rename(tf = target) %>%
   distinct(tf) %>%
   pull(tf)
 
-# we need to remove this tf as it is not available in gtex regulons
+# we need to remove these tfs as they are not available in gtex regulons
 missing_tfs = readRDS("output/in_vitro_benchmark/meta/missing_tfs_dorothea_vs_gtex.rds")
 
+# load gtex regulons
 gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
   map(function(regulon_path) {
     tissue_regulon = get(load(regulon_path))
@@ -409,10 +424,10 @@ gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
     return(sub_tissue_regulon)
   })
 
+# load normalized expression data
 norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
 
-# norm_expr = norm_expr_df %>% slice(1) %>% pluck(4,1)
-
+# run metaviper
 ss_metaviper_result = norm_expr_df %>%
   slice(1) %>%
   mutate(ss_viper_result = norm_expr %>% map(
@@ -422,11 +437,11 @@ ss_metaviper_result = norm_expr_df %>%
            adaptive.size = F, cores = 4))) %>%
   select(-norm_expr)
 
+# save intermediate result
 saveRDS(ss_metaviper_result, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_scores.rds")
 
 
-####
-##### make contrast
+# build contrast on TF activity level
 human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
   distinct(tf, confidence)
 ss_metaviper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_scores.rds") %>%
@@ -437,9 +452,6 @@ d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
   mutate(day = as.numeric(day))
 
 setup = purrr::reduce(list(ss_metaviper_result, c, d), .f = left_join, by=c("series", "day", "class"))
-ss_metaviper_result = setup %>% dplyr::slice(1) %>% pluck(4,1)
-contrast = setup %>% dplyr::slice(1) %>% pluck(5,1)
-design = setup %>% dplyr::slice(1) %>% pluck(6,1)
 
 ss_metaviper_contrasts = setup %>%
   transmute(series, day, class, ss_metaviper_contrast = pmap(., .f = function(ss_viper_result, contrast, design, ...) {
@@ -461,7 +473,7 @@ saveRDS(ss_metaviper_contrasts, "output/in_vitro_benchmark/ss_analysis/ss_metavi
 
 
 #### AUCell - DoRothEA
-```{r}
+```{r "run d-aucell"}
 # only for those tfs there are perturbation experiments
 target_tfs = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
   rename(tf = target) %>%
@@ -511,9 +523,6 @@ d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
   mutate(day = as.numeric(day))
 
 setup = purrr::reduce(list(aucell, c, d), .f = left_join, by=c("series", "day", "class"))
-# aucell_result = setup %>% dplyr::slice(1) %>% pluck(4,1)
-# contrast = setup %>% dplyr::slice(1) %>% pluck(5,1)
-# design = setup %>% dplyr::slice(1) %>% pluck(6,1)
 
 aucell_contrasts = setup %>%
   transmute(series, day, class, aucell_contrast = pmap(., .f = function(aucell_result, contrast, design, ...) {
@@ -534,266 +543,95 @@ saveRDS(aucell_contrasts, "output/in_vitro_benchmark/ss_analysis/aucell_dorothea
 
 ```
 
-### Performance evaluation
-#### VIPER on contrast
-```{r "performance evaluation"}
-bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
-viper_result = readRDS("output/in_vitro_benchmark/expr/viper_result.rds") %>%
-  unnest(viper_result) %>%
-  anti_join(bad_experiments, by="contrast") %>%
-  nest(-c(series, day, class), .key="viper_result")
+#### SCENIC
+##### Build data set dependent regulatory networks
+```{r "build scenic networks"}
+scenic_regulons = list.files("output/in_vitro_benchmark/scenic", recursive = T, full.names = T, pattern = "2.6_") %>%
+  map_dfr(function(path) {
+    class = path %>% str_split(pattern = "/") %>% pluck(1,4)
+    readRDS(path) %>%
+      enframe("tf", "target") %>%
+      mutate(class = class) %>%
+      filter(!str_detect(tf, "extended")) %>%
+      unnest(target) %>%
+      dplyr::select(class, tf, target)
+  }) %>%
+  nest(-class, .key="regulons") %>%
+  mutate(class = factor(
+    class, levels = c("perturbseq_7","perturbseq_13","crispri")))
 
-basic_setup = tribble(
-  ~confidence, ~group,
-  # "A", "single_conf",
-  # "B", "single_conf",
-  # "C", "single_conf",
-  # "D", "single_conf",
-  # "E", "single_conf",
-  "A", "multi_conf",
-  "AB", "multi_conf",
-  "ABC", "multi_conf",
-  "ABCD", "multi_conf",
-  "ABCDE", "multi_conf"
-) %>%
-    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
-                                                    "AB", "ABC", "ABCD", 
-                                                    "ABCDE")))
-
-
-    
-setup = basic_setup %>% 
-  group_by(confidence, group) %>%
-  mutate(viper_result = list(viper_result)) %>%
-  ungroup() %>%
-  unnest(viper_result)
-    
-confidence = setup %>% pluck(1,15)
-viper_result = setup %>% pluck(6,15)
-series = "crispri"
-
-# TODO find out why the tf PITX2 is not considered in benchmark. 
-# It is targeted in CRISPRI dataset with three replicates
-input_performance = setup %>%
-  mutate(input = pmap(., .f = function(confidence, viper_result, series, ...) {
-    message(confidence, "-", series)
-      conf_levels = str_split(confidence, "") %>% 
-        pluck(1)
-      
-      perturbed_tfs = viper_result %>%
-        distinct(target) %>%
-        dplyr::rename(tf = target)
-      
-      # extract number of uniquely covered tfs
-      coverage = viper_result %>% 
-        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
-        filter(confidence %in% conf_levels) %>%
-        filter(tf == target) %>%
-        summarise(coverage = n_distinct(tf)) %>%
-        pull()
-      
-      viper_result %>%
-        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
-        filter(confidence %in% conf_levels) %>%
-        mutate(response = case_when(tf == target ~ 1,
-                                    TRUE ~ 0),
-               response = factor(response, levels = c("1", "0")),
-               predictor = activity * -1,
-               coverage = coverage) %>%
-        select(tf, rep, response, predictor, coverage)
-  })) %>%
-  select(-viper_result) %>%
-  unnest(input)
-
-# get roc and pr coords 
-roc_coords = input_performance %>%
-  group_by(confidence, group, class) %>%
-  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
-  ungroup()
-
-saveRDS(roc_coords, "output/in_vitro_benchmark/roc_coords.rds")
-
-pr_coords = input_performance %>%
-  group_by(confidence, group, class) %>%
-  pr_curve(response, predictor) %>%
-  ungroup()
-
-saveRDS(pr_coords, "output/in_vitro_benchmark/pr_coords.rds")
-
-
-  # build meta data for different setups
-# performance evaluation for each individual dataset
-meta_performance_individual = input_performance %>%
-  dplyr::count(group, confidence, series, day, class, response, coverage) %>%
-  spread(response, n) %>%
-  dplyr::rename(positive = `1`, negative = `0`) %>%
-  mutate(random = positive/(positive + negative)) %>%
-  mutate(type = "individual")
-
-# performance evaluation for each global experiment (perturbseq and crispri)
-coverage_within = input_performance %>%
-  filter(response == 1) %>%
-  group_by(confidence, group, series, response) %>% 
-  summarise(coverage = n_distinct(tf)) %>%
-  ungroup() %>%
-  select(confidence, group, series, coverage)
-
-meta_performance_within = input_performance %>%
-  select(-coverage) %>%
-  left_join(coverage_within, by=c("confidence", "group", "series")) %>%
-  dplyr::count(group, confidence, series, response, coverage) %>%
-  spread(response, n) %>%
-  dplyr::rename(positive = `1`, negative = `0`) %>%
-  mutate(random = positive/(positive + negative)) %>%
-  mutate(type = "within")
-
-# performance evaluation across all data sets
-coverage_across = input_performance %>%
-  filter(response == 1) %>%
-  group_by(confidence, group, response) %>% 
-  summarise(coverage = n_distinct(tf)) %>%
-  ungroup() %>%
-  select(confidence, group, coverage)
-
-meta_performance_across = input_performance %>%
-  select(-coverage) %>%
-  left_join(coverage_across, by=c("confidence", "group")) %>%
-  dplyr::count(group, confidence, response, coverage) %>%
-  spread(response, n) %>%
-  dplyr::rename(positive = `1`, negative = `0`) %>%
-  mutate(random = positive/(positive + negative)) %>%
-  mutate(type = "across")
-
-
-# performance evaluation across but without perturbseq 13
-coverage_sub = input_performance %>%
-  filter(class != "perturbseq_13") %>%
-  filter(response == 1) %>%
-  group_by(confidence, group, response) %>% 
-  summarise(coverage = n_distinct(tf)) %>%
-  ungroup() %>%
-  select(confidence, group, coverage)
-
-meta_performance_sub = input_performance %>%
-  select(-coverage) %>%
-  left_join(coverage_sub, by=c("confidence", "group")) %>%
-  dplyr::count(group, confidence, response, coverage) %>%
-  spread(response, n) %>%
-  dplyr::rename(positive = `1`, negative = `0`) %>%
-  mutate(random = positive/(positive + negative)) %>%
-  mutate(type = "sub")
-
-
-
-# individual data set specific performance
-performance_result_roc_individual = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group, class, day, series) %>%
-  roc_auc(response, predictor, options=list(direction = "<")) %>%
-  mutate(type = "individual") %>%
-  left_join(meta_performance_individual, by = c("confidence", "group", "class", "series", "day", "type"))
-
-# within data set specific performance (e.g. day 7 and 13 are merged)
-performance_result_roc_within = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group, series) %>%
-  roc_auc(response, predictor, options=list(direction = "<")) %>%
-  mutate(type = "within") %>%
-  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
-
-# performance across all available datasets
-performance_result_roc_across = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group) %>%
-  roc_auc(response, predictor, options=list(direction = "<")) %>%
-  mutate(type = "across") %>%
-  left_join(meta_performance_across,by = c("confidence", "group", "type"))
-
-performance_result_roc_sub = input_performance %>%
-  filter(group == "multi_conf") %>% 
-  filter(class != "perturbseq_13") %>%
-  group_by(confidence, group) %>%
-  roc_auc(response, predictor, options=list(direction = "<")) %>%
-  mutate(type = "sub") %>%
-  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
-
-
-
-performance_result_roc = bind_rows(performance_result_roc_individual,
-                                   performance_result_roc_within,
-                                   performance_result_roc_across,
-                                   performance_result_roc_sub)
-
-# individual data set specific performance
-performance_result_pr_individual = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group, class, series, day) %>%
-  pr_auc(data = ., truth = response, ... = predictor) %>%
-  mutate(type = "individual") %>%
-  left_join(meta_performance_individual, by = c("confidence", "group","class", 
-                                                "series", "day", "type"))
-
-# within data set specific performance (e.g. day 7 and 13 are merged)
-performance_result_pr_within = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group, series) %>%
-  pr_auc(response, predictor) %>%
-  mutate(type = "within") %>%
-  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
-
-# performance across all available datasets
-performance_result_pr_across = input_performance %>% 
-  filter(group == "multi_conf") %>%
-  group_by(confidence, group) %>%
-  pr_auc(response, predictor) %>%
-  mutate(type = "across") %>%
-  left_join(meta_performance_across,by = c("confidence", "group", "type"))
-
-# performance results across all dataset but perturbseq 13
-performance_result_pr_sub = input_performance %>%
-  filter(group == "multi_conf") %>% 
-  filter(class != "perturbseq_13") %>%
-  group_by(confidence, group) %>%
-  pr_auc(response, predictor) %>%
-  mutate(type = "sub") %>%
-  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
-
-performance_result_pr = bind_rows(performance_result_pr_individual,
-                                  performance_result_pr_within,
-                                  performance_result_pr_across,
-                                  performance_result_pr_sub)
-
-performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
-  dplyr::rename(metric = .metric, auc = .estimate) %>%
-  select(-.estimator) %>%
-  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
-                            TRUE ~  random))
-
-saveRDS(performance_result, "output/in_vitro_benchmark/performance_result.rds")
-
-
-# get roc and pr coords for "sub" data sets
-roc_coords = input_performance %>%
-  filter(group == "multi_conf") %>% 
-  filter(class != "perturbseq_13") %>%
-  group_by(confidence, group) %>%
-  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
-  ungroup()
-
-saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_roc_coords_sub.rds")
-
-pr_coords = input_performance %>%
-  filter(group == "multi_conf") %>% 
-  filter(class != "perturbseq_13") %>%
-  group_by(confidence, group, class) %>%
-  pr_curve(response, predictor) %>%
-  ungroup()
-
-saveRDS(pr_coords, "output/in_vitro_benchmark/pr_coords.rds")
+saveRDS(scenic_regulons, "output/in_vitro_benchmark/scenic/scenic_regulons.rds")
 ```
 
-#### AUCell on single samples
-```{r "performance evaluation"}
+##### Run SCENIC
+```{r "run scenic"}
+# load scenic regulons
+scenic_regulons = readRDS("output/in_vitro_benchmark/scenic/scenic_regulons.rds")
+
+# convert scenic regulons into gene sets
+genesets = scenic_regulons %>%
+  transmute(class, geneset = regulons %>% map(function(regulons) {
+    regulons %>%
+      group_by(tf) %>%
+      summarise(geneset = list(GeneSet(target, setName = unique(tf)))) %>%
+      ungroup() %>%
+      deframe() %>%
+      GeneSetCollection()
+  }))
+
+# load normalized expression data
+norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
+
+# combine expression with gene sets
+input = norm_expr_df %>%
+  inner_join(genesets, by="class")
+
+ss_scenic_scores = input %>%
+  transmute(series, day, class, ss_scenic_result = pmap(., .f= function(norm_expr, geneset, ...) {
+    obj = AUCell_buildRankings(norm_expr, nCores=4, plotStats = F, verbose = F) %>%
+      AUCell_calcAUC(geneset, ., verbose=F)
+    
+    res = obj@assays$data@listData$AUC
+  }))
+
+
+# save intermediate results
+saveRDS(ss_scenic_scores, "output/in_vitro_benchmark/ss_analysis/scenic_scores.rds")
+
+# Build contrast on TF activity level
+scenic_result = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_scores.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(scenic_result, c, d), .f = left_join, by=c("series", "day", "class"))
+
+scenic_contrasts = setup %>%
+  transmute(series, day, class, scenic_contrast = pmap(., .f = function(ss_scenic_result, contrast, design, ...) {
+    stopifnot(colnames(ss_scenic_result) == rownames(design))
+    lmFit(ss_scenic_result, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(tf = gene, contrast = term, auc = estimate)
+  })) %>%
+  unnest(scenic_contrast) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>% 
+  nest(-series,-day, -class, .key = "scenic_contrast")
+  
+saveRDS(scenic_contrasts, "output/in_vitro_benchmark/ss_analysis/scenic_contrast.rds")
+```
+
+
+
+### Performance evaluation
+
+
+#### D-AUCell on single samples
+```{r "performance evaluation of d-aucell"}
 bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
 aucell_result = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_dorothea_contrast.rds") %>%
   unnest(aucell_contrast) %>%
@@ -804,11 +642,6 @@ aucell_result = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_dorothea_c
 
 basic_setup = tribble(
   ~confidence, ~group,
-  # "A", "single_conf",
-  # "B", "single_conf",
-  # "C", "single_conf",
-  # "D", "single_conf",
-  # "E", "single_conf",
   "A", "multi_conf",
   "AB", "multi_conf",
   "ABC", "multi_conf",
@@ -826,10 +659,6 @@ setup = basic_setup %>%
   mutate(aucell_result = list(aucell_result)) %>%
   ungroup() %>%
   unnest(aucell_result)
-    
-# confidence = setup %>% pluck(1,1)
-# aucell_contrast = setup %>% pluck(6,1)
-# series = "perturbseq"
 
 # TODO find out why the tf PITX2 is not considered in benchmark. 
 # It is targeted in CRISPRI dataset with three replicates
@@ -879,8 +708,6 @@ pr_coords = input_performance %>%
 
 saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/aucell_pr_coords.rds")
 
-
-  
 # build meta data for different setups
 # performance evaluation for each individual dataset
 meta_performance_individual = input_performance %>%
@@ -1052,8 +879,230 @@ pr_coords = input_performance %>%
 saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/aucell_pr_coords_sub.rds")
 ```
 
+
+#### SCENIC on single samples
+```{r "performance evaluation of scenic"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+scenic_result = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_contrast.rds") %>%
+  unnest(scenic_contrast) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  filter(tf != "FOXA2") %>% # FOXA2 must be removed as AUCell does not provide a prediction for this TF (less than 20 % targets)
+  filter(tf != "PITX2") %>% # PITX2 as only 2 tagets of this TF are available in gene expression matrix
+  nest(-c(series, day, class), .key="scenic_contrast")
+
+
+setup = scenic_result
+    
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+scenic_contrast = setup %>% pluck(4,1)
+series = "perturbseq"
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(scenic_contrast, series, ...) {
+    message(series)
+      
+    perturbed_tfs = scenic_contrast %>%
+      distinct(target) %>%
+      dplyr::rename(tf = target)
+      
+    # extract number of uniquely covered tfs
+    coverage = scenic_contrast %>% 
+      semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+      filter(tf == target) %>%
+      summarise(coverage = n_distinct(tf)) %>%
+      pull()
+    
+    scenic_contrast %>%
+      semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+      mutate(response = case_when(tf == target ~ 1,
+                                  TRUE ~ 0),
+             response = factor(response, levels = c("1", "0")),
+             predictor = auc * -1,
+             coverage = coverage) %>%
+      select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-scenic_contrast) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(class) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/scenic_roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/scenic_pr_coords.rds")
+
+
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("series")) %>%
+  dplyr::count(series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  mutate(coverage = coverage_across$coverage) %>%
+  # left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  mutate(coverage = coverage_across$coverage) %>%
+  # left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  group_by(class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  group_by(series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  roc_auc(response, predictor, options=list(direction = "<", transpose=T)) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  group_by(class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("class","series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  group_by(series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/ss_analysis/scenic_performance_result.rds")
+
+
+# get roc and pr coords for "sub" data sets
+roc_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/aucell_roc_coords_sub.rds")
+
+pr_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/aucell_pr_coords_sub.rds")
+```
+
+
 #### VIPER on single samples
-```{r "performance evaluation"}
+```{r "performance evaluation of viper"}
 bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
 ss_viper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_contrast.rds") %>%
   unnest(ss_viper_contrast) %>%
@@ -1064,11 +1113,6 @@ ss_viper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_contra
 
 basic_setup = tribble(
   ~confidence, ~group,
-  # "A", "single_conf",
-  # "B", "single_conf",
-  # "C", "single_conf",
-  # "D", "single_conf",
-  # "E", "single_conf",
   "A", "multi_conf",
   "AB", "multi_conf",
   "ABC", "multi_conf",
@@ -1086,10 +1130,7 @@ setup = basic_setup %>%
   mutate(ss_viper_result = list(ss_viper_result)) %>%
   ungroup() %>%
   unnest(ss_viper_result)
-    
-# confidence = setup %>% pluck(1,1)
-# aucell_contrast = setup %>% pluck(6,1)
-# series = "perturbseq"
+
 
 # TODO find out why the tf PITX2 is not considered in benchmark. 
 # It is targeted in CRISPRI dataset with three replicates
@@ -1139,8 +1180,6 @@ pr_coords = input_performance %>%
 
 saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_pr_coords.rds")
 
-
-  
 # build meta data for different setups
 # performance evaluation for each individual dataset
 meta_performance_individual = input_performance %>%
@@ -1313,7 +1352,7 @@ saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_pr_coords_sub
 ```
 
 #### metaVIPER on single samples
-```{r "performance evaluation"}
+```{r "performance evaluation of metaviper"}
 bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
 ss_metaviper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_contrast.rds") %>%
   unnest(ss_metaviper_contrast) %>%
@@ -1324,11 +1363,6 @@ ss_metaviper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metavipe
 
 basic_setup = tribble(
   ~confidence, ~group,
-  # "A", "single_conf",
-  # "B", "single_conf",
-  # "C", "single_conf",
-  # "D", "single_conf",
-  # "E", "single_conf",
   "A", "multi_conf",
   "AB", "multi_conf",
   "ABC", "multi_conf",
@@ -1346,10 +1380,6 @@ setup = basic_setup %>%
   mutate(ss_metaviper_result = list(ss_metaviper_result)) %>%
   ungroup() %>%
   unnest(ss_metaviper_result)
-    
-# confidence = setup %>% pluck(1,1)
-# aucell_contrast = setup %>% pluck(6,1)
-# series = "perturbseq"
 
 # TODO find out why the tf PITX2 is not considered in benchmark. 
 # It is targeted in CRISPRI dataset with three replicates
@@ -1571,3 +1601,1249 @@ pr_coords = input_performance %>%
 saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_pr_coords_sub.rds")
 ```
 
+
+### Single sample anlysis with focus on only overlapping TFs
+#### Find the TFs that were perturbed and are part of SCENIC, DoRothEA and GTEx regulons
+```{r, "overlapping tfs"}
+target_tfs = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds") %>%
+  distinct(class, tf = target) 
+
+scenic = readRDS("output/in_vitro_benchmark/scenic/scenic_regulons.rds") %>%
+  unnest() %>% 
+  distinct(class, tf)
+
+metaviper = list.files("data/regulons/gtex", full.names = T) %>%
+  map(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    return(tissue_regulon)
+  }) %>%
+  map(names) %>% 
+  unlist() %>% 
+  unique() %>% 
+  enframe(name = NULL, value = "tf") %>%
+  mutate(n = 3) %>%
+  uncount(n) %>%
+  mutate(class = rep(c("perturbseq_13", "perturbseq_7", "crispri"), 1300))
+
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf) %>%
+  mutate(n = 3) %>%
+  uncount(n) %>%
+  mutate(class = rep(c("perturbseq_13", "perturbseq_7", "crispri"), 1396))
+
+common_tfs = purrr::reduce(list(target_tfs, metaviper, dorothea), inner_join, by=c("class", "tf")) %>%
+  distinct(tf)
+
+dorothea %>%
+  semi_join(common_tfs) %>%
+  distinct(tf)
+
+metaviper %>%
+  semi_join(common_tfs) %>%
+  distinct(tf)
+
+scenic %>%
+  semi_join(common_tfs) %>%
+  distinct(tf)
+saveRDS(common_tfs, "output/in_vitro_benchmark/meta/common_tfs_perttarget_scenic_dorothea_gtex.rds")
+
+# get confidence and mode of regulations assignment for common tfs
+d = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") 
+
+x = purrr::reduce(list(scenic, target_tfs, metaviper, dorothea), inner_join, by=c("class", "tf")) %>%
+  filter(class == "crispri") %>%
+  inner_join(d)
+
+
+x %>% 
+  distinct(tf, confidence) %>%
+  count(confidence) %>%
+  ggplot(aes(x=confidence, y=n)) +
+  geom_col()
+
+x %>%
+  count(tf, mor) %>%
+  ggplot(aes(x=factor(mor), y=n)) +
+  geom_col() +
+  facet_rep_wrap(~tf, scales="free_y")
+
+
+
+# get perturbation information about common tfs
+t = readRDS("output/in_vitro_benchmark/meta/guide_matrices.rds")
+y = purrr::reduce(list(scenic, target_tfs, metaviper, dorothea), inner_join, by=c("class", "tf")) %>%
+  filter(class == "crispri") %>%
+  inner_join(t)
+```
+
+#### Run VIPER
+```{r "run viper"}
+
+common_tfs = readRDS("output/in_vitro_benchmark/meta/common_tfs_perttarget_scenic_dorothea_gtex.rds")
+# subset dorothea
+human_dorothea_viper_format = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  semi_join(common_tfs, by="tf") %>%
+  df2regulon()
+
+norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
+
+
+ss_viper_result = norm_expr_df %>%
+  mutate(ss_viper_result = norm_expr %>% map(
+    ~viper(eset = as.matrix(.x),
+           regulon = human_dorothea_viper_format,
+           nes = T, method = "scale",minsize = 4,eset.filter = F, 
+           adaptive.size = F, cores = 4))) %>%
+  select(-norm_expr)
+
+saveRDS(ss_viper_result, "output/in_vitro_benchmark/ss_analysis/ss_viper_scores_sub.rds")
+
+
+# Build contrast on TF activity level
+human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf, confidence)
+ss_viper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_scores_sub.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(ss_viper_result, c, d), .f = left_join, by=c("series", "day", "class"))
+
+ss_viper_contrasts = setup %>%
+  transmute(series, day, class, ss_viper_contrast = pmap(., .f = function(ss_viper_result, contrast, design, ...) {
+    stopifnot(colnames(ss_viper_result) == rownames(design))
+    lmFit(ss_viper_result, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(tf = gene, contrast = term, auc = estimate)
+  })) %>%
+  unnest(ss_viper_contrast) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>% 
+  left_join(human_dorothea, by="tf") %>%
+  nest(-series,-day, -class, .key = "ss_viper_contrast")
+  
+saveRDS(ss_viper_contrasts, "output/in_vitro_benchmark/ss_analysis/ss_viper_contrast_sub.rds")
+```
+
+#### Run metaVIPER on single samples
+```{r}
+common_tfs = readRDS("output/in_vitro_benchmark/meta/common_tfs_perttarget_scenic_dorothea_gtex.rds")
+
+gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
+  map(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    
+    # index of tfs we want to keep
+    keep_ix = which(names(tissue_regulon) %in% common_tfs$tf)
+    sub_tissue_regulon = tissue_regulon[keep_ix]
+    return(sub_tissue_regulon)
+  })
+
+norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
+
+
+ss_metaviper_result = norm_expr_df %>%
+  slice(1) %>%
+  mutate(ss_viper_result = norm_expr %>% map(
+    ~viper(eset = as.matrix(.x),
+           regulon = gtex_regulons[[1]],
+           nes = T, method = "scale",minsize = 4,eset.filter = F, 
+           adaptive.size = F, cores = 4))) %>%
+  select(-norm_expr)
+
+saveRDS(ss_metaviper_result, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_scores_sub.rds")
+
+
+#Build contrast on TF activtiy level
+human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf, confidence)
+ss_metaviper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_scores_sub.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(ss_metaviper_result, c, d), .f = left_join, by=c("series", "day", "class"))
+
+ss_metaviper_contrasts = setup %>%
+  transmute(series, day, class, ss_metaviper_contrast = pmap(., .f = function(ss_viper_result, contrast, design, ...) {
+    stopifnot(colnames(ss_viper_result) == rownames(design))
+    lmFit(ss_viper_result, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(tf = gene, contrast = term, auc = estimate)
+  })) %>%
+  unnest(ss_metaviper_contrast) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>% 
+  left_join(human_dorothea, by="tf") %>%
+  nest(-series,-day, -class, .key = "ss_metaviper_contrast")
+  
+saveRDS(ss_metaviper_contrasts, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_contrast_sub.rds")
+```
+
+#### AUCell - DoRothEA
+```{r}
+common_tfs = readRDS("output/in_vitro_benchmark/meta/common_tfs_perttarget_scenic_dorothea_gtex.rds")
+
+human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  semi_join(common_tfs, by="tf") %>%
+  distinct(tf, target, confidence) %>%
+  add_count(tf) %>%
+  filter(n>=4) %>%
+  select(-n)
+
+genesets = human_dorothea %>%
+  group_by(tf) %>%
+  summarise(geneset = list(GeneSet(target))) %>%
+  transmute(tf, geneset2 = pmap(., .f=function(tf, geneset, ...) {
+    setName(geneset) = tf
+    return(geneset)
+  })) %>%
+  deframe() %>%
+  GeneSetCollection()
+
+df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
+aucell_results = df %>%
+  mutate(aucell_result = pmap(., .f = function(norm_expr, class, ...) {
+    print(class)
+    obj = AUCell_buildRankings(norm_expr, nCores=4, plotStats = F, verbose = F) %>%
+      AUCell_calcAUC(genesets, ., verbose=F)
+    res = obj@assays$data@listData$AUC
+  })) %>%
+  select(-norm_expr)
+
+saveRDS(aucell_results, "output/in_vitro_benchmark/ss_analysis/aucell_dorothea_scores_sub.rds")
+
+##### make contrast
+human_dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf, confidence)
+aucell = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_dorothea_scores_sub.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(aucell, c, d), .f = left_join, by=c("series", "day", "class"))
+
+aucell_contrasts = setup %>%
+  transmute(series, day, class, aucell_contrast = pmap(., .f = function(aucell_result, contrast, design, ...) {
+    stopifnot(colnames(aucell_result) == rownames(design))
+    lmFit(aucell_result, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(tf = gene, contrast = term, auc = estimate)
+  })) %>%
+  unnest(aucell_contrast) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>% 
+  left_join(human_dorothea, by="tf") %>%
+  nest(-series,-day, -class, .key = "aucell_contrast")
+  
+saveRDS(aucell_contrasts, "output/in_vitro_benchmark/ss_analysis/aucell_dorothea_contrast_sub.rds")
+
+```
+
+#### Run SCENIC
+```{r}
+common_tfs = readRDS("output/in_vitro_benchmark/meta/common_tfs_perttarget_scenic_dorothea_gtex.rds")
+scenic_regulons = readRDS("output/in_vitro_benchmark/scenic/scenic_regulons.rds") %>%
+  unnest(regulons) %>%
+  semi_join(common_tfs, by="tf") %>%
+  nest(tf, target, .key="regulons")
+
+genesets = scenic_regulons %>%
+  transmute(class, geneset = regulons %>% map(function(regulons) {
+    regulons %>%
+      group_by(tf) %>%
+      summarise(geneset = list(GeneSet(target, setName = unique(tf)))) %>%
+      ungroup() %>%
+      deframe() %>%
+      GeneSetCollection()
+  }))
+
+norm_expr_df = readRDS("output/in_vitro_benchmark/expr/norm_expr.rds")
+
+
+input = norm_expr_df %>%
+  inner_join(genesets, by="class")
+
+ss_scenic_scores = input %>%
+  # dplyr::slice(1) %>%
+  transmute(series, day, class, ss_scenic_result = pmap(., .f= function(norm_expr, geneset, ...) {
+    print("hi")
+    # g = subsetGeneSets(genesets, rownames(emat)) 
+    obj = AUCell_buildRankings(norm_expr, nCores=4, plotStats = F, verbose = F) %>%
+      AUCell_calcAUC(geneset, ., verbose=F)
+    
+    res = obj@assays$data@listData$AUC
+  }))
+
+
+saveRDS(ss_scenic_scores, "output/in_vitro_benchmark/ss_analysis/scenic_scores_sub.rds")
+
+####
+##### make contrast
+scenic_result = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_scores_sub.rds") %>%
+  mutate(day = as.numeric(day))
+c = readRDS("output/in_vitro_benchmark/meta/contrasts.rds") %>%
+  mutate(day = as.numeric(day))
+d = readRDS("output/in_vitro_benchmark/meta/design_df.rds") %>%
+  mutate(day = as.numeric(day))
+
+setup = purrr::reduce(list(scenic_result, c, d), .f = left_join, by=c("series", "day", "class"))
+
+scenic_contrasts = setup %>%
+  transmute(series, day, class, scenic_contrast = pmap(., .f = function(ss_scenic_result, contrast, design, ...) {
+    stopifnot(colnames(ss_scenic_result) == rownames(design))
+    lmFit(ss_scenic_result, design) %>%
+      contrasts.fit(contrast) %>%
+      tidy() %>%
+      select(tf = gene, contrast = term, auc = estimate)
+  })) %>%
+  unnest(scenic_contrast) %>%
+  separate(contrast, into = c("target", "rep", "day", "series"), sep = "_", remove = F) %>%
+  mutate(day = as.numeric(day),
+         rep = as.numeric(rep)) %>% 
+  # left_join(human_dorothea, by="tf") %>%
+  nest(-series,-day, -class, .key = "scenic_contrast")
+  
+saveRDS(scenic_contrasts, "output/in_vitro_benchmark/ss_analysis/scenic_contrast_sub.rds")
+```
+
+### Performance evaluation with focus on common tfs
+
+#### AUCell on single samples
+```{r "performance evaluation"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+aucell_result = readRDS("output/in_vitro_benchmark/ss_analysis/aucell_dorothea_contrast_sub.rds") %>%
+  unnest(aucell_contrast) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  filter(tf != "FOXA2") %>% # FOXA2 must be removed as AUCell does not provide a prediction for this TF (less than 20 % targets)
+  filter(tf != "PITX2") %>% # PITX2 as only 2 tagets of this TF are available in gene expression matrix
+  nest(-c(series, day, class), .key="aucell_contrast")
+
+basic_setup = tribble(
+  ~confidence, ~group,
+  "A", "multi_conf",
+  "AB", "multi_conf",
+  "ABC", "multi_conf",
+  "ABCD", "multi_conf",
+  "ABCDE", "multi_conf"
+) %>%
+    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
+                                                    "AB", "ABC", "ABCD", 
+                                                    "ABCDE")))
+setup = basic_setup %>% 
+  group_by(confidence, group) %>%
+  mutate(aucell_result = list(aucell_result)) %>%
+  ungroup() %>%
+  unnest(aucell_result)
+
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(confidence, aucell_contrast, series, ...) {
+    message(confidence, "-", series)
+      conf_levels = str_split(confidence, "") %>% 
+        pluck(1)
+      
+      perturbed_tfs = aucell_contrast %>%
+        distinct(target) %>%
+        dplyr::rename(tf = target)
+      
+      # extract number of uniquely covered tfs
+      coverage = aucell_contrast %>% 
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        filter(tf == target) %>%
+        summarise(coverage = n_distinct(tf)) %>%
+        pull()
+      
+      aucell_contrast %>%
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        mutate(response = case_when(tf == target ~ 1,
+                                    TRUE ~ 0),
+               response = factor(response, levels = c("1", "0")),
+               predictor = auc * -1,
+               coverage = coverage) %>%
+        select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-aucell_contrast) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/aucell_roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/aucell_pr_coords.rds")
+
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(group, confidence, series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("confidence", "group", "series")) %>%
+  dplyr::count(group, confidence, series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group", "class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose=T)) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group","class", 
+                                                "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/ss_analysis/aucell_performance_result_sub.rds")
+```
+
+
+#### SCENIC on single samples
+```{r "performance evaluation"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+scenic_result = readRDS("output/in_vitro_benchmark/ss_analysis/scenic_contrast_sub.rds") %>%
+  unnest(scenic_contrast) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  filter(tf != "FOXA2") %>% # FOXA2 must be removed as AUCell does not provide a prediction for this TF (less than 20 % targets)
+  filter(tf != "PITX2") %>% # PITX2 as only 2 tagets of this TF are available in gene expression matrix
+  nest(-c(series, day, class), .key="scenic_contrast")
+
+
+setup = scenic_result
+    
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(scenic_contrast, series, ...) {
+    message(series)
+      
+    perturbed_tfs = scenic_contrast %>%
+      distinct(target) %>%
+      dplyr::rename(tf = target)
+      
+    # extract number of uniquely covered tfs
+    coverage = scenic_contrast %>% 
+      semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+      filter(tf == target) %>%
+      summarise(coverage = n_distinct(tf)) %>%
+      pull()
+    
+    scenic_contrast %>%
+      semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+      mutate(response = case_when(tf == target ~ 1,
+                                  TRUE ~ 0),
+             response = factor(response, levels = c("1", "0")),
+             predictor = auc * -1,
+             coverage = coverage) %>%
+      select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-scenic_contrast) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(class) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/scenic_roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/scenic_pr_coords.rds")
+
+
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("series")) %>%
+  dplyr::count(series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  mutate(coverage = coverage_across$coverage) %>%
+  # left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  mutate(coverage = coverage_across$coverage) %>%
+  # left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  group_by(class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  group_by(series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  roc_auc(response, predictor, options=list(direction = "<", transpose=T)) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  group_by(class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("class","series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  group_by(series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/ss_analysis/scenic_performance_result_sub.rds")
+
+```
+
+
+#### VIPER on single samples
+```{r "performance evaluation"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+ss_viper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_viper_contrast_sub.rds") %>%
+  unnest(ss_viper_contrast) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  filter(tf != "FOXA2") %>% # FOXA2 must be removed as AUCell does not provide a prediction for this TF (less than 20 % targets)
+  filter(tf != "PITX2") %>% # PITX2 as only 2 tagets of this TF are available in gene expression matrix
+  nest(-c(series, day, class), .key="ss_viper_contrast")
+
+basic_setup = tribble(
+  ~confidence, ~group,
+  "A", "multi_conf",
+  "AB", "multi_conf",
+  "ABC", "multi_conf",
+  "ABCD", "multi_conf",
+  "ABCDE", "multi_conf"
+) %>%
+    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
+                                                    "AB", "ABC", "ABCD", 
+                                                    "ABCDE")))
+
+setup = basic_setup %>% 
+  group_by(confidence, group) %>%
+  mutate(ss_viper_result = list(ss_viper_result)) %>%
+  ungroup() %>%
+  unnest(ss_viper_result)
+
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(confidence, ss_viper_contrast, series, ...) {
+    message(confidence, "-", series)
+      conf_levels = str_split(confidence, "") %>% 
+        pluck(1)
+      
+      perturbed_tfs = ss_viper_contrast %>%
+        distinct(target) %>%
+        dplyr::rename(tf = target)
+      
+      # extract number of uniquely covered tfs
+      coverage = ss_viper_contrast %>% 
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        filter(tf == target) %>%
+        summarise(coverage = n_distinct(tf)) %>%
+        pull()
+      
+      ss_viper_contrast %>%
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        mutate(response = case_when(tf == target ~ 1,
+                                    TRUE ~ 0),
+               response = factor(response, levels = c("1", "0")),
+               predictor = auc * -1,
+               coverage = coverage) %>%
+        select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-ss_viper_contrast) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_pr_coords.rds")
+
+  
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(group, confidence, series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("confidence", "group", "series")) %>%
+  dplyr::count(group, confidence, series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group", "class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose=T)) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group","class", 
+                                                "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/ss_analysis/ss_viper_performance_result_sub.rds")
+
+
+# get roc and pr coords for "sub" data sets
+roc_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_roc_coords_sub.rds")
+
+pr_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_viper_pr_coords_sub.rds")
+```
+
+#### metaVIPER on single samples
+```{r "performance evaluation"}
+bad_experiments = readRDS("output/in_vitro_benchmark/expr/bad_experiments.rds")
+ss_metaviper_result = readRDS("output/in_vitro_benchmark/ss_analysis/ss_metaviper_contrast_sub.rds") %>%
+  unnest(ss_metaviper_contrast) %>%
+  anti_join(bad_experiments, by="contrast") %>%
+  filter(tf != "FOXA2") %>% # FOXA2 must be removed as AUCell does not provide a prediction for this TF (less than 20 % targets)
+  filter(tf != "PITX2") %>% # PITX2 as only 2 tagets of this TF are available in gene expression matrix
+  nest(-c(series, day, class), .key="ss_metaviper_contrast")
+
+basic_setup = tribble(
+  ~confidence, ~group,
+  "A", "multi_conf",
+  "AB", "multi_conf",
+  "ABC", "multi_conf",
+  "ABCD", "multi_conf",
+  "ABCDE", "multi_conf"
+) %>%
+    mutate(confidence = factor(confidence, levels=c("A", "B", "C", "D", "E",
+                                                    "AB", "ABC", "ABCD", 
+                                                    "ABCDE")))
+
+setup = basic_setup %>% 
+  group_by(confidence, group) %>%
+  mutate(ss_metaviper_result = list(ss_metaviper_result)) %>%
+  ungroup() %>%
+  unnest(ss_metaviper_result)
+
+# TODO find out why the tf PITX2 is not considered in benchmark. 
+# It is targeted in CRISPRI dataset with three replicates
+input_performance = setup %>%
+  mutate(input = pmap(., .f = function(confidence, ss_metaviper_contrast, series, ...) {
+    message(confidence, "-", series)
+      conf_levels = str_split(confidence, "") %>% 
+        pluck(1)
+      
+      perturbed_tfs = ss_metaviper_contrast %>%
+        distinct(target) %>%
+        dplyr::rename(tf = target)
+      
+      # extract number of uniquely covered tfs
+      coverage = ss_metaviper_contrast %>% 
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        filter(tf == target) %>%
+        summarise(coverage = n_distinct(tf)) %>%
+        pull()
+      
+      ss_metaviper_contrast %>%
+        semi_join(perturbed_tfs, by="tf") %>%  # removes TFs without a single positive case
+        filter(confidence %in% conf_levels) %>%
+        mutate(response = case_when(tf == target ~ 1,
+                                    TRUE ~ 0),
+               response = factor(response, levels = c("1", "0")),
+               predictor = auc * -1,
+               coverage = coverage) %>%
+        select(tf, rep, response, predictor, coverage)
+  })) %>%
+  select(-ss_metaviper_contrast) %>%
+  unnest(input)
+
+# get roc and pr coords 
+roc_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_roc_coords.rds")
+
+pr_coords = input_performance %>%
+  group_by(confidence, group, class) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_pr_coords.rds")
+
+
+  
+# build meta data for different setups
+# performance evaluation for each individual dataset
+meta_performance_individual = input_performance %>%
+  dplyr::count(group, confidence, series, day, class, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "individual")
+
+# performance evaluation for each global experiment (perturbseq and crispri)
+coverage_within = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, series, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, series, coverage)
+
+meta_performance_within = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_within, by=c("confidence", "group", "series")) %>%
+  dplyr::count(group, confidence, series, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "within")
+
+# performance evaluation across all data sets
+coverage_across = input_performance %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_across = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_across, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "across")
+
+
+# performance evaluation across but without perturbseq 13
+coverage_sub = input_performance %>%
+  filter(class != "perturbseq_13") %>%
+  filter(response == 1) %>%
+  group_by(confidence, group, response) %>% 
+  summarise(coverage = n_distinct(tf)) %>%
+  ungroup() %>%
+  select(confidence, group, coverage)
+
+meta_performance_sub = input_performance %>%
+  select(-coverage) %>%
+  left_join(coverage_sub, by=c("confidence", "group")) %>%
+  dplyr::count(group, confidence, response, coverage) %>%
+  spread(response, n) %>%
+  dplyr::rename(positive = `1`, negative = `0`) %>%
+  mutate(random = positive/(positive + negative)) %>%
+  mutate(type = "sub")
+
+
+
+# individual data set specific performance
+performance_result_roc_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, day, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group", "class", "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_roc_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_roc_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose=T)) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+performance_result_roc_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_auc(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+
+
+performance_result_roc = bind_rows(performance_result_roc_individual,
+                                   performance_result_roc_within,
+                                   performance_result_roc_across,
+                                   performance_result_roc_sub)
+
+# individual data set specific performance
+performance_result_pr_individual = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, class, series, day) %>%
+  pr_auc(data = ., truth = response, ... = predictor) %>%
+  mutate(type = "individual") %>%
+  left_join(meta_performance_individual, by = c("confidence", "group","class", 
+                                                "series", "day", "type"))
+
+# within data set specific performance (e.g. day 7 and 13 are merged)
+performance_result_pr_within = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group, series) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "within") %>%
+  left_join(meta_performance_within, by = c("confidence", "group", "series", "type"))
+
+# performance across all available datasets
+performance_result_pr_across = input_performance %>% 
+  filter(group == "multi_conf") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "across") %>%
+  left_join(meta_performance_across,by = c("confidence", "group", "type"))
+
+# performance results across all dataset but perturbseq 13
+performance_result_pr_sub = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_auc(response, predictor) %>%
+  mutate(type = "sub") %>%
+  left_join(meta_performance_sub,by = c("confidence", "group", "type"))
+
+performance_result_pr = bind_rows(performance_result_pr_individual,
+                                  performance_result_pr_within,
+                                  performance_result_pr_across,
+                                  performance_result_pr_sub)
+
+performance_result = bind_rows(performance_result_roc, performance_result_pr) %>%
+  dplyr::rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) %>%
+  mutate(random = case_when(metric == "roc_auc" ~ 0.5,
+                            TRUE ~  random))
+
+saveRDS(performance_result, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_performance_result_sub.rds")
+
+# get roc and pr coords for "sub" data sets
+roc_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  roc_curve(response, predictor, options=list(direction = "<", transpose = T)) %>%
+  ungroup()
+
+saveRDS(roc_coords, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_roc_coords_sub.rds")
+
+pr_coords = input_performance %>%
+  filter(group == "multi_conf") %>% 
+  filter(class != "perturbseq_13") %>%
+  group_by(confidence, group) %>%
+  pr_curve(response, predictor) %>%
+  ungroup()
+
+saveRDS(pr_coords, "output/in_vitro_benchmark/ss_analysis/ss_metaviper_pr_coords_sub.rds")
+```

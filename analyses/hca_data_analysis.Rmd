@@ -21,7 +21,6 @@ library(tidyverse)
 library(tidylog)
 library(ggrepel)
 library(cowplot)
-library(myutils)
 library(furrr)
 library(pheatmap)
 library(AUCell)
@@ -41,9 +40,10 @@ library(AUCell)
 library(msigdf)
 library(fgsea)
 library(Seurat)
-
+library(corrr)
 
 source("src/my_ggplot_themes.R")
+source("src/dorothea_analysis.R")
 theme_set(theme_cowplot())
 plan(multiprocess, workers = 4)
 options("tidylog.display" = list(print))
@@ -134,10 +134,10 @@ meta %>%
   geom_hline(yintercept = log2(50)) +
   labs(y = "log2(count)", x="Celltype")
 ```
+
 #### Gene coverage per technology
 ```{r "gene coverage per technology"}
 count_mat = readRDS("output/hca_data/expression/raw_preprocessed.rds")
-raw = count_mat[1,2] %>% pluck(1,1)
 df = count_mat %>%
   transmute(technology, x = raw %>% map(function(raw) {
     raw %>% 
@@ -203,6 +203,31 @@ expr_norm = count_mat %>%
   }))
 
 saveRDS(expr_norm, "output/hca_data/expression/norm.rds")
+```
+
+### Compare DoRothEA with GTEx regulons to find common TFs
+```{r}
+gtex_regulons = list.files("data/regulons/gtex", full.names = T) %>%
+  map(function(regulon_path) {
+    tissue_regulon = get(load(regulon_path))
+    tf_names = names(tissue_regulon) %>% str_split(pattern = " ", simplify = T)
+    names(tissue_regulon) = tf_names[,1]
+    return(tissue_regulon)
+  }) %>%
+  map(names) %>% 
+  unlist() %>% 
+  unique() %>% 
+  enframe(name = NULL, value = "tf")
+
+
+dorothea = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
+  distinct(tf)
+
+anti_join(dorothea, gtex_regulons, by="tf") %>%
+  saveRDS("output/hca_data/meta/tfs_available_in_dorothea_but_not_gtex.rds")
+  
+anti_join(gtex_regulons, dorothea, by="tf") %>%
+  saveRDS("output/hca_data/meta/tfs_available_in_gtex_but_not_dorothea.rds")
 ```
 
 ### Run Footprint methods
@@ -291,9 +316,9 @@ saveRDS(progeny_scores, "output/hca_data/progeny/progeny_scores.rds")
 ```{r "run viper"}
 expr_norm = readRDS("output/hca_data/expression/norm.rds")
 missing_tfs = readRDS("output/hca_data/meta/tfs_available_in_dorothea_but_not_gtex.rds")
-regulon = dorothea_regulon_human_v1 %>%
+
+regulon = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv") %>%
   anti_join(missing_tfs, by="tf") %>%
-  # filter(confidence %in% c("A","B")) %>%
   df2regulon()
 
 sc_viper = function(expr, regulon, ...) {
@@ -307,7 +332,6 @@ viper_scores = expr_norm %>%
 
 saveRDS(viper_scores, "output/hca_data/viper/viper_scores.rds")
 ```
-
 
 #### Run MetaVIPER
 ```{r}
@@ -364,11 +388,8 @@ genesets = human_dorothea %>%
   deframe() %>%
   GeneSetCollection()
 
-
 df = readRDS("output/hca_data/expression/norm.rds")
 
-
-# norm = df %>% slice(1) %>% pluck(2,1)
 ss_daucell_scores = df %>%
   mutate(ss_daucell_result = norm %>% map(function(norm) {
     print("hi")
@@ -437,9 +458,6 @@ input = models %>%
   mutate(emat = list(df)) %>%
   unnest(emat, .preserve = genesets)
 
-norm = input %>% slice(1) %>% pluck(4,1)
-genesets = input %>% slice(1) %>% pluck(2,1)
-
 ss_paucell_scores = input %>%
   mutate(ss_paucell_result = pmap(., .f=function(norm, genesets, footprints, technology, ...) {
     message(footprints,"-",technology)
@@ -455,58 +473,61 @@ ss_paucell_scores = input %>%
 saveRDS(ss_paucell_scores, "output/hca_data/paucell/paucell_result.rds")
 ```
 
-
-#### Run GSEA with GO gene sets
+#### Run SCENIC
+##### Build protocol dependent regulatory networks
 ```{r}
-progeny_go_mapping = tribble(
-  ~progeny, ~geneset,
-  "Androgen", "GO_ANDROGEN_RECEPTOR_SIGNALING_PATHWAY",
-  "EGFR", "GO_ERBB_SIGNALING_PATHWAY",
-  "Estrogen", "GO_INTRACELLULAR_ESTROGEN_RECEPTOR_SIGNALING_PATHWAY",
-  "Hypoxia", "GO_REGULATION_OF_CELLULAR_RESPONSE_TO_HYPOXIA",
-  "JAK-STAT", "GO_JAK_STAT_CASCADE_INVOLVED_IN_GROWTH_HORMONE_SIGNALING_PATHWAY",
-  "MAPK","GO_REGULATION_OF_MAPK_CASCADE",
-  "NFkB", "GO_NIK_NF_KAPPAB_SIGNALING",
-  "p53", "GO_REGULATION_OF_DNA_DAMAGE_RESPONSE_SIGNAL_TRANSDUCTION_BY_P53_CLASS_MEDIATOR",
-  "PI3K", "GO_PHOSPHATIDYLINOSITOL_3_KINASE_SIGNALING",
-  "TGFb", "GO_TRANSFORMING_GROWTH_FACTOR_BETA_RECEPTOR_SIGNALING_PATHWAY",
-  "TNFa","GO_TUMOR_NECROSIS_FACTOR_MEDIATED_SIGNALING_PATHWAY",
-  "Trail", "GO_EXTRINSIC_APOPTOTIC_SIGNALING_PATHWAY_VIA_DEATH_DOMAIN_RECEPTORS",
-  "VEGF", "GO_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_SIGNALING_PATHWAY",
-  "WNT", "GO_WNT_SIGNALING_PATHWAY",
-)
+# path = "output/hca_data/scenic/complete/CEL-Seq2/int/2.6_regulons_asGeneSet.Rds"
+scenic_regulons = list.files("output/hca_data/scenic/complete", recursive = T, 
+                             full.names = T, pattern = "2.6_") %>%
+  map_dfr(function(path) {
+    technology = path %>% str_split(pattern = "/") %>% pluck(1,5)
+    readRDS(path) %>%
+      enframe("tf", "target") %>%
+      mutate(technology = technology) %>%
+      filter(!str_detect(tf, "extended")) %>%
+      unnest(target) %>%
+      select(technology, tf, target)
+  }) %>%
+  nest(-technology, .key="regulons") %>%
+  mutate(technology = factor(
+    technology, levels = c("Chromium","inDrop","C1HT-medium","C1HT-small",
+                           "CEL-Seq2","ddSEQ","Drop-Seq","ICELL8","MARS-Seq",
+                           "Chromium (sn)","Quartz-Seq2","SCRB-Seq",
+                           "Smart-Seq2")))
 
-go_genesets = msigdf.human %>%
-  inner_join(progeny_go_mapping) %>%
-  select(pathway = progeny, gene = symbol) %>%
-  group_by(pathway) %>%
-  summarise(geneset = list(gene)) %>%
-  deframe()
+saveRDS(scenic_regulons, "output/hca_data/scenic/complete/scenic_regulons.rds")
+```
+
+##### Run SCENIC
+```{r}
+scenic_regulons = readRDS("output/hca_data/scenic/complete/scenic_regulons.rds")
+
+genesets = scenic_regulons %>%
+  transmute(technology, geneset = regulons %>% map(function(regulons) {
+    regulons %>%
+      group_by(tf) %>%
+      summarise(geneset = list(GeneSet(target, setName = unique(tf)))) %>%
+      ungroup() %>%
+      deframe() %>%
+      GeneSetCollection()
+  }))
+
+df = readRDS("output/hca_data/expression/norm.rds")
+
+input = df %>%
+  inner_join(genesets, by="technology")
 
 
-expr_norm = readRDS("output/hca_data/expression/norm.rds")
-# norm = expr_norm %>% pluck(2,1)
-
-ss_gogsea_scores = expr_norm %>%
-  mutate(ss_gogsea_scores = future_pmap(., function(norm, ...) {
+ss_scenic_scores = input %>%
+  transmute(technology, ss_scenic_result = pmap(., .f= function(norm, geneset, ...) {
+    obj = AUCell_buildRankings(norm, nCores=4, plotStats = F, verbose = F) %>%
+      AUCell_calcAUC(geneset, ., verbose=F)
     
-    #col = norm[,1]
-    zscores = t(scale(t(as.matrix(norm))))
-    x = apply(zscores, 2, function(col) {
-      fgsea(pathways = go_genesets,
-            stats = col,
-            nperm = 1000) %>%
-        as_tibble() #%>%
-        select(pathway, NES)
-    }) %>%
-      enframe() %>%
-      unnest(value) %>%
-      spread(name, NES) %>%
-      data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
-  }, .progress = T)) %>%
-  select(-norm)
+    res = obj@assays$data@listData$AUC
+  }))
 
-saveRDS(ss_gogsea_scores, "output/hca_data/gogsea/gogsea_scores.rds")
+
+saveRDS(ss_scenic_scores, "output/hca_data/scenic/complete/scenic_result.rds")
 ```
 
 #### Summarize footprint scores
@@ -523,6 +544,7 @@ progeny = readRDS("output/hca_data/progeny/progeny_scores.rds") %>%
       as_tibble() %>%
       gather(feature, activity, -cell)
   })) 
+
 viper = readRDS("output/hca_data/viper/viper_scores.rds") %>%
   mutate(tool = "viper") %>%
   transmute(technology, tool, activity = viper %>% map(function(dorothea) {
@@ -533,7 +555,6 @@ viper = readRDS("output/hca_data/viper/viper_scores.rds") %>%
       gather(cell, activity, -feature) %>%
       inner_join(tf_confidence_mapping, by="feature")
   })) 
-
 
 metaviper = readRDS("output/hca_data/metaviper/metaviper_scores.rds") %>%
   mutate(tool = "metaviper") %>%
@@ -567,18 +588,17 @@ paucell = readRDS("output/hca_data/paucell/paucell_result.rds") %>%
       gather(cell, activity, -feature)
   })) 
 
-# gogsea = readRDS("output/hca_data/gogsea/gogsea_scores.rds") %>%
-#   mutate(tool = "gogsea") %>%
-#   transmute(technology, tool, activity = ss_gogsea_scores %>% map(function(gogsea) {
-#     gogsea %>%
-#       data.frame(check.names = F, stringsAsFactors = F) %>%
-#       rownames_to_column("feature") %>%
-#       as_tibble() %>%
-#       gather(cell, activity, -feature)
-#   })) 
+scenic = readRDS("output/hca_data/scenic/complete/scenic_result.rds") %>%
+  mutate(tool = "scenic") %>%
+  transmute(technology,tool, activity = ss_scenic_result %>% map(function(scenic) {
+    scenic %>%
+      data.frame(check.names = F, stringsAsFactors = F) %>%
+      rownames_to_column("feature") %>%
+      as_tibble() %>%
+      gather(cell, activity, -feature)
+  })) 
 
-# gogsea is missing currently
-summarized_footprint_scores = bind_rows(progeny,viper, paucell, daucell, metaviper) %>%
+summarized_footprint_scores = bind_rows(progeny,viper, paucell, daucell, metaviper, scenic) %>%
   unnest() %>%
   inner_join(meta, by=c("cell", "technology")) %>%
   rename(celltype = nnet2) %>%
@@ -587,12 +607,13 @@ summarized_footprint_scores = bind_rows(progeny,viper, paucell, daucell, metavip
             s = sd(activity)) %>%
   ungroup()
 
-saveRDS(summarized_footprint_scores, "output/hca_data/footprint_scores_heatmap/summarized_footprints_scores.rds")
+saveRDS(summarized_footprint_scores, 
+        "output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds")
+write_csv(summarized_footprint_scores, 
+          "output/hca_data/summarized_footprint_scores/summarized_footprints_scores.csv")
 ```
 
-
 ### Clustering
-
 #### Setup hierarchy structure wo Megakaryocytes
 ```{r, "setup and visualize hierarchy structure}
 # setup hierarchy structure
@@ -656,28 +677,6 @@ hierarchy = readRDS("output/hca_data/meta/meta_df.rds") %>%
   nest(-hrchy_level, .key="cluster_vec")
 
 saveRDS(hierarchy, "output/hca_data/umap/cluster_hierarchy.rds")
-
-# dendogramm
-a = list()
-a$merge <- matrix(c(-1,-2,
-                    -3,-4,
-                    1,-5,
-                    2,-6,
-                    3,-7,
-                    4,-8,
-                    5,6,
-                    7,-9), nc=2, byrow=TRUE ) 
-a$height <- c(1,1,2,2,3,3,4,5)    # define merge heights
-a$order <- c(3,4,6,7,5,8,1,2,9)
-a$labels <- c("CD4 T cells","CD8 T cells","CD14+ Monocytes","FCGR3A+ Monocytes","NK cells","Dendritic cells","B cells","Megakaryocytes","HEK cells") # labels of leaves
-class(a) <- "hclust"        # make it an hclust object
-dendo = ggdendrogram(a, theme_dendro = FALSE) +
-  labs(y = "Hierarchy level", x=NULL) +
-  theme(axis.line = element_blank(),
-        axis.ticks = element_blank(),
-        axis.text.y = element_text(angle = 0))
-
-saveRDS(dendo, "fig/clustering_analysis/dendogram.rds")
 ```
 
 #### Prepare different input matrices for clustering with UMAP
@@ -686,46 +685,34 @@ saveRDS(dendo, "fig/clustering_analysis/dendogram.rds")
 set.seed(123)
 
 missing_tfs = readRDS("output/hca_data/meta/tfs_available_in_dorothea_but_not_gtex.rds")
+d = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv")
 
-tfs_A = dorothea_regulon_human_v1 %>%
+tfs_A = d %>%
   filter(confidence %in% c("A")) %>%
   distinct(tf) %>%
   anti_join(missing_tfs)
 
-tfs_AB = dorothea_regulon_human_v1 %>%
+tfs_AB = d %>%
   filter(confidence %in% c("A", "B")) %>%
   distinct(tf) %>%
   anti_join(missing_tfs)
 
-tfs_ABC = dorothea_regulon_human_v1 %>%
+tfs_ABC = d %>%
   filter(confidence %in% c("A", "B", "C")) %>%
   distinct(tf) %>%
   anti_join(missing_tfs)
 
-tfs_ABCD = dorothea_regulon_human_v1 %>%
+tfs_ABCD = d %>%
   filter(confidence %in% c("A", "B", "C", "D")) %>%
   distinct(tf) %>%
   anti_join(missing_tfs)
 
-tfs_ABCDE = dorothea_regulon_human_v1 %>%
+tfs_ABCDE = d %>%
   distinct(tf) %>%
   anti_join(missing_tfs)
 
 df = readRDS("output/hca_data/expression/norm.rds")
 
-# marker_genes = get(load("data/hca_data/cell_type_annotations/marker_genes.RData")) %>%
-#   enframe("celltype", "gene") %>%
-#   filter(celltype != "Megakaryocytes") %>%
-#   unnest() %>%
-#   pull(gene)
-# 
-# positive_control = df %>%
-#   transmute(technology, mat = norm %>% map(function(norm) {
-#     norm[marker_genes,]
-#   })) %>%
-#   mutate(class = "marker_genes")
-# 
-# saveRDS(positive_control,"output/hca_data/umap/umap_input/marker_genes.rds")
 
 norm_expr = df %>%
   mutate(class = "normalized_expression") %>%
@@ -747,8 +734,6 @@ most_var_norm = df %>%
 
 saveRDS(most_var_norm,"output/hca_data/umap/umap_input/most_var_norm_expr.rds")
 
-
-# norm = df %>% pluck(2,1)
 cv2 = df %>%
   transmute(technology, mat = norm %>% future_map(function(norm) {
     sd_df = norm %>% 
@@ -770,7 +755,6 @@ cv2 = df %>%
 
 saveRDS(cv2,"output/hca_data/umap/umap_input/most_cv_norm_expr.rds")
 
-norm = df %>% slice(3) %>% pluck(2,1)
 seurat_2000_vst = df %>%
   transmute(technology, mat = future_pmap(., .f= function(norm, technology, ...) {
     print(technology)
@@ -819,9 +803,6 @@ seurat_2000_disp = df %>%
 
 saveRDS(seurat_2000_disp,"output/hca_data/umap/umap_input/top_2000_seurat_disp.rds")
 
-
-
-norm = df %>% slice(3) %>% pluck(2,1)
 set.seed(12345)
 random_seurat_113 = df %>%
   transmute(technology, mat = future_pmap(., .f= function(norm, technology, ...) {
@@ -1113,6 +1094,11 @@ paucell = readRDS("output/hca_data/paucell/paucell_result.rds") %>%
 
 saveRDS(paucell,"output/hca_data/umap/umap_input/paucell.rds")
 
+# SCENIC -----------------------------------------------------------------------
+scenic = readRDS("output/hca_data/scenic/scenic_result.rds") %>%
+  mutate(class = "scenic") %>%
+  dplyr::rename(mat = ss_scenic_result)
+
 # GSEA with GO terms -----------------------------------------------------------
 gogsea = readRDS("output/hca_data/gogsea/gogsea_scores.rds") %>%
   mutate(class = "gogsea") %>%
@@ -1202,9 +1188,10 @@ random_14_genes_res = map_df(seq_len(10), ~random_14_genes) %>%
 saveRDS(random_14_genes_res,"output/hca_data/umap/umap_input/random_14_genes.rds")
 ```
 
-#### Clustering
+#### Application of UMAP
 ```{r "clustering"}
 do_umap = function(mat, meta, class, technology,...) {
+  # browser()
   message(technology, " - ", class)
   if (str_detect(class, "progeny")) {
     mat = t(mat)
@@ -1228,10 +1215,12 @@ meta = readRDS("output/hca_data/meta/meta_df.rds") %>%
   filter(!nnet2 %in% c("unclassified", "Megakaryocytes")) %>%
   nest(-technology, .key="meta")
 
+hrchy = readRDS("output/hca_data/umap/cluster_hierarchy.rds") %>%
+  unnest(cluster_vec) %>%
+  select(-id) %>%
+  spread(hrchy_level, label)
 
-
-path = list.files("output/hca_data/umap/umap_input", full.names = T)[22] 
-df = list.files("output/hca_data/umap/umap_input", full.names = T)[c(22,26)] %>%
+df = list.files("output/hca_data/umap/umap_input", full.names = T) %>%
   future_map_dfr(function(path) {
     df = readRDS(path) %>%
       left_join(meta)
@@ -1251,6 +1240,7 @@ saveRDS(res, "output/hca_data/umap/umap_coords.rds")
 #### Silhouettes
 ```{r "silhouettes"}
 do_sil = function(coords, technology, class,...) {
+  # browser()
   message(technology, "-", class)
   
   res = h %>%
@@ -1286,6 +1276,8 @@ umap_coords = readRDS("output/hca_data/umap/umap_coords.rds")
 h = readRDS("output/hca_data/umap/cluster_hierarchy.rds")
 
 sil_result = umap_coords %>%
+  # filter(class == "scenic") %>%
+  # mutate(sil = pmap(., .f=do_sil))
   mutate(sil = future_pmap(., .f=do_sil, .progress = T))
 
 saveRDS(sil_result, "output/hca_data/umap/silhouette_results.rds")
@@ -1345,9 +1337,10 @@ cor = sil_res %>%
     class == "top_2000_seurat_vst" ~ "Seurat (vst)",
     class == "top_2000_seurat_mvp" ~ "Seurat (mvp)",
     class == "top_2000_seurat_disp" ~ "Seurat (disp)",
-    class == "normalized_expression" ~ "Normalized expression")) %>%
+    class == "normalized_expression" ~ "Normalized expression",
+    class == "scenic" ~ "SCENIC")) %>%
   mutate(label = as_factor(label)) %>%
-  mutate(label = fct_shift(label, -10)) %>%
+  mutate(label = fct_relevel(label, "Neg. control", after=Inf)) %>%
   unnest(sil) %>%
   group_by(technology, gg, class, label, hrchy_level) %>%
   summarise(m = mean(mean_avg_width)) %>%
@@ -1356,7 +1349,7 @@ cor = sil_res %>%
 
 saveRDS(cor, "output/hca_data/umap/sil_correlation_input.rds")
 ```
-#### Statistical evaluation of silhouette scatter plot
+#### Statistical evaluation of silhouette plot
 ```{r}
 df = readRDS("output/hca_data/umap/sil_correlation_input.rds")
 class_label_mapping = df %>% distinct(feature = class, label)
@@ -1365,7 +1358,7 @@ technologies = df %>% pull(technology) %>% unique()
 tf_stats = df %>%
   filter(class %in% c("top_2000_seurat_vst","daucellAB","metaviperAB",
                       "random_113_seurat_mvg","tf_genes",
-                      "top_113_seurat_mvg","viperAB")) %>%
+                      "top_113_seurat_mvg","viperAB", "scenic")) %>%
   semi_join(class_label_mapping) %>%
   mutate(class = label) %>%
   select(-label) %>%
@@ -1420,4 +1413,186 @@ pathway_stats = df %>%
 
 saveRDS(pathway_stats, "output/hca_data/umap/pathway_stats.rds")
 
+```
+
+#### Correlation of TF activity scores across scRNA-seq protocols
+```{r}
+df = readRDS("output/hca_data/summarized_footprint_scores/summarized_footprints_scores.rds") %>%
+  filter(!tool %in% c("progeny", "paucell")) %>%
+  filter(!celltype %in% c("unclassified", "Megakaryocytes")) %>%
+  select(-s, -footprints)
+
+cor_input = df %>%
+  unite(key, celltype, feature, remove = F) %>%
+  group_by(technology, tool, feature) %>%
+  mutate(z = scale(m)) %>%
+  ungroup() 
+
+cor_res_high_conf = cor_input %>%
+  nest(-tool) %>%
+  mutate(cor_df = data %>% map(function(data) {
+    data %>%
+      filter(confidence %in% c("A","B") | is.na(confidence)) %>%
+      select(technology, key, z) %>%
+      spread(technology, z, fill=NA)
+  })) %>%
+  mutate(r = cor_df %>% map(function(cor_df) {
+    cor_df %>%
+      select_if(is.numeric) %>%
+      correlate() %>%
+      shave() %>%
+      stretch() %>%
+      drop_na()
+  })) 
+
+cor_res_low_conf = cor_input %>%
+  nest(-tool) %>%
+  mutate(cor_df = data %>% map(function(data) {
+    data %>%
+      filter(confidence %in% c("C","D", "E") | is.na(confidence)) %>%
+      select(technology, key, z) %>%
+      spread(technology, z, fill=NA)
+  })) %>%
+  mutate(r = cor_df %>% map(function(cor_df) {
+    cor_df %>%
+      select_if(is.numeric) %>%
+      correlate() %>%
+      shave() %>%
+      stretch() %>%
+      drop_na()
+  })) 
+
+saveRDS(cor_res_high_conf, "output/hca_data/tf_correlations/tf_correlation_high_conf.rds")
+saveRDS(cor_res_low_conf, "output/hca_data/tf_correlations/tf_correlation_low_conf.rds")
+```
+### Blood cancer analysis
+#### TF activity vs gene essentiality
+```{python}
+import pandas as pd
+import numpy as np
+from scipy.stats import pearsonr as pcor
+
+### read latest HCA data
+hca_tf_activity = pd.read_csv('output/hca_data/summarized_footprint_scores/summarized_footprints_scores.csv', 
+                              sep=',',header=0,index_col=None)
+
+# remove HEK, Megakaryocytes and unlassified cells and remove the column footprints
+hca_tf_activity = hca_tf_activity.drop(hca_tf_activity[(hca_tf_activity.celltype == "HEK cells") | (hca_tf_activity.celltype == "Megakaryocytes") | (hca_tf_activity.celltype == "unclassified") | (hca_tf_activity.tool == "progeny") | (hca_tf_activity.tool == "paucell")].index).drop(["footprints"], axis=1)
+
+
+### get all tfs in our analysis
+all_tfs = hca_tf_activity['feature'].unique()
+
+### read achilles data
+achilles = pd.read_csv('data/hca_data/blood_cancer/D2_combined_gene_dep_scores.csv',sep=',',header=0,index_col=0)
+
+### set achilles index to gene names
+achilles.index=pd.Series(achilles.index).apply(lambda x:x.split()[0]).values
+
+### get ccle gene exspression values
+gex = pd.read_csv('data/hca_data/blood_cancer/CCLE_expression.csv',sep=',',header=0,index_col=0)
+
+### set ccle columns to gene names
+gex.columns = pd.Series(gex.columns).apply(lambda x:x.split()[0]).values
+
+### we concentrate on tfs shared in HCA analysis, Achilles and CCLE
+shared_tfs = list(set(all_tfs) & set(gex.columns) & set(achilles.index))
+gex = gex[shared_tfs]
+achilles = achilles.loc[shared_tfs]
+
+cell_anno = pd.read_csv('data/hca_data/blood_cancer/sample_info.csv',sep=',',header=0,index_col=0)
+
+### set gex index to ccle name
+gex.index = cell_anno['CCLE Name'][gex.index].values
+
+### shared cell lines between achilles and gex
+all_cells = list(set(achilles.columns) & set(gex.index))
+gex = gex.loc[all_cells]
+achilles = achilles[all_cells].T
+
+gex_achilles_corr=[]
+for tf in achilles.columns:
+    cells=achilles.index[~achilles[tf].isnull()]
+    gex_achilles_corr.append(pcor(achilles.loc[cells,tf],gex.loc[cells,tf])[0])
+gex_achilles_corr=pd.DataFrame(pd.Series(gex_achilles_corr,index=achilles.columns))
+gex_achilles_corr.columns=['correlation']
+
+gex_achilles_corr.sort_values('correlation')
+
+gex_achilles_corr.to_csv('output/hca_data/blood_cancer/gex_achilles_corr.csv',sep=',')
+
+# multiply achilles with sign of correlation
+achilles=achilles*np.sign(gex_achilles_corr['correlation'])
+achilles.to_csv('output/hca_data/blood_cancer/tf_achilles_sign_corrected.csv',sep=',')
+
+########
+tf_ess = pd.read_csv('output/hca_data/blood_cancer/tf_achilles_sign_corrected.csv',sep=',',header=0,index_col=0)
+
+# Load manually created annotation file for blood cancers. We will use the myeloid_lymphid columns to see the differences between myeloid and lymphid cells.
+blood_anno = pd.read_csv('data/hca_data/blood_cancer/blood_cancer_anno.csv',
+                         sep=',',header=0,index_col=None)
+blood_anno.index=blood_anno['CCLE Name']
+fil=blood_anno['myeloid_lymphoid']=='M'
+blood_anno.loc[blood_anno.index[fil],'myeloid_lymphoid']='Myeloid'
+blood_anno.loc[blood_anno.index[~fil],'myeloid_lymphoid']='Lymphoid'
+blood_anno.head()
+
+#make long version of achilles and add annotation
+tf_ess = tf_ess.loc[blood_anno.index]
+tf_ess['Cell'] = tf_ess.index
+tf_ess = tf_ess.melt(id_vars='Cell',value_vars = tf_ess.columns[:-1])
+tf_ess.columns=['cell','feature','essentiality']
+tf_ess["MorL"] = blood_anno.loc[tf_ess['cell'].values,'myeloid_lymphoid'].values
+
+### we create a similar annotation file for blood cells in HCA data
+pbmc_anno = pd.Series({'B cells':'Lymphoid',
+          'CD14+ Monocytes':'Myeloid',
+          'CD4 T cells':'Lymphoid',
+          'CD8 T cells':'Lymphoid',
+          'Dendritic cells':'Myeloid',
+          'FCGR3A+ Monocytes':'Myeloid',
+          'NK cells':'Lymphoid'})
+          
+#add annotation to hca data
+hca_tf_activity['MorL']=pbmc_anno[hca_tf_activity['celltype'].values].values
+
+hca_tf_activity.to_csv('output/hca_data/blood_cancer/tf_activities.csv',sep=',')
+tf_ess.to_csv('output/hca_data/blood_cancer/tf_essentialities.csv', sep=',')
+```
+
+#### Global analysis of difference in effect size of activity and essentiality
+```{r}
+tf_act = read_csv("output/hca_data/blood_cancer/tf_activities.csv") %>%
+  select(-X1)
+tf_ess = read_csv("output/hca_data/blood_cancer/tf_essentialities.csv") %>%
+  select(-X1)
+
+a = tf_act %>%
+  group_by(technology, tool, feature, confidence, MorL) %>%
+  summarize(mean_m = mean(m)) %>%
+  ungroup() %>%
+  spread(MorL, mean_m) %>%
+  mutate(diff_activity = Lymphoid - Myeloid) %>%
+  select(-Lymphoid, -Myeloid)
+
+e = tf_ess %>%
+  group_by(feature, MorL) %>%
+  summarise(mean_ess = mean(essentiality, na.rm=T)) %>%
+  spread(MorL, mean_ess) %>%
+  mutate(diff_ess = Lymphoid - Myeloid) %>%
+  select(-Lymphoid, -Myeloid)
+
+res = a %>%
+  inner_join(e, by="feature") %>%
+  filter(confidence %in% c("A", "B") | is.na(confidence)) %>%
+  nest(-c(technology, tool)) %>%
+  mutate(r = data %>% map(function(data) {
+    data %>%
+      select_if(is.numeric) %>%
+      cor.test(.$diff_activity, .$diff_ess, data=.) %>%
+      tidy() %>%
+      select(estimate, p.value, statistic)
+  }))
+
+saveRDS(res, "output/hca_data/blood_cancer/effect_size_diff.rds")
 ```

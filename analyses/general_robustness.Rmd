@@ -16,23 +16,26 @@ knitr::knit(..., quiet = TRUE)
 These libraries and sources are used in this analysis 
 ```{r "setup", message=F}
 library(tidyverse)
+library(tidylog)
 library(furrr)
 library(viper)
-library(pROC)
-library(PRROC)
+library(yardstick)
 library(biobroom)
-library(msigdf)
 library(fgsea)
 
+
+options("tidylog.display" = list(print))
 source("src/roc_curve_analysis.R")
-source("src/progeny_analysis.R")
 source("src/dorothea_analysis.R")
-source("src/my_ggplot_themes.R")
+source("src/progeny_analysis.R")
 
 plan(multiprocess, workers=4)
 ```
+
 ### Utility functions
 ```{r "utility functions"}
+# This function induces low gene coverage by sampling a specified number of 
+# genes (dropin) per experiment (id)
 induce_low_gene_coverage = function(df, dropin, reps, ...) {
   if (dropin == "all") {
     x = df %>%
@@ -54,10 +57,10 @@ induce_low_gene_coverage = function(df, dropin, reps, ...) {
 ### Introducing low coverage for each contrast independently
 #### PROGENy
 ```{r "downsampled-progeny benchmark"}
+# load full progeny matrix
 model = readRDS("data/progeny_models/full_matrix/full_progeny_matrix.rds")
 
-# filter based on top x genes
-
+# filter full progeny matrix based on top x footprint genes 
 # top 100 
 m_100 = model %>% group_by(pathway) %>% top_n(100, -adj.p) %>% ungroup() %>%
   select(gene, pathway, weight=zscore) %>%
@@ -95,11 +98,12 @@ m_all = model %>%
   data.frame(row.names=1, check.names = F)
 
 
-##
+# load benchmark datadata containing contrasts of single pathway perturbations experiments
 expr = readRDS("data/general_robustness/progeny_benchmark_data.rds") %>%
   filter(organism == "human") %>%
   nest(-organism, .key="df")
 
+# summarize the different progeny models in a tibble
 M = tribble(
   ~organism, ~M, ~missing_value, ~footprints,
   "human",  m_100, 0, 100,
@@ -111,58 +115,137 @@ M = tribble(
 ) %>%
   mutate(footprints = as_factor(footprints))
 
-
+# definition of technical replicates and different gene coverage values (dropin)
 reps = 25
 dropins = c("all", "500", "1000", "2000", "3000", "5000", "7000", "8000")
 
+# subset benchmark data to the corresponding gene coverage
 set.seed(123)
 pathway_low_coverage_df = tibble(dropin = dropins) %>%
   mutate(organism = "human") %>%
   inner_join(expr, by="organism") %>%
   mutate(reps = reps) %>%
-  mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
+  dplyr::mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
   unnest(df) 
 
-
+# couple subsetted benchmark data with the various model matrices
 design = pathway_low_coverage_df %>%
   inner_join(M, by="organism")
 
-# run progeny and measure performance globally
-progeny_performance_global = design %>%
-  mutate(activity = future_pmap(., .f = run_progeny, .progress = T)) %>%
-  select(-c(df, M, missing_value)) %>%
-  mutate(activity = activity %>% map(prepare_progeny_for_roc, filter_tn=T)) %>%
-  mutate(roc = activity %>% map(calc_roc_curve),
-         pr = activity %>% map(calc_pr_curve))
+# run progeny
+progeny_scores = design %>%
+  arrange(dropin, footprints) %>%
+  mutate(activity = pmap(., .f = run_progeny)) %>%
+  # mutate(activity = future_pmap(., .f = run_progeny, .progress = T)) %>%
+  select(-c(df, M, missing_value))
 
-progeny_performance_global = progeny_performance_global %>%
-  mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
-                                          2000, 1000, 500)))
+# save and load intermediate results
+saveRDS(progeny_scores, "output/general_robustness/progeny_scores.rds")
+progeny_scores = readRDS("output/general_robustness/progeny_scores.rds")
 
-saveRDS(progeny_performance_global, "output/general_robustness/progeny_performance.rds")
+# prepare progeny output for benchmark
+progeny_benchmark_input = progeny_scores %>%
+  mutate(benchmark_input = activity %>% map(function(activity) {
+    # extract only pathway that were targeted AND also predicted
+    z = activity %>% 
+      filter(progeny_pathway == pathway) %>%
+      distinct(pathway) %>%
+      pull()
+    
+    activity %>%
+      filter(progeny_pathway %in% z & pathway %in% z) %>%
+      mutate(response = case_when(progeny_pathway == pathway ~ 1,
+                                  progeny_pathway != pathway ~ 0),
+             response = factor(response, levels = c("1", "0")),
+             predictor = score * sign) %>%
+      select(response, predictor, run, pathway = progeny_pathway)
+  })) %>%
+  unnest(benchmark_input)
+
+# save and load intermediate results
+saveRDS(progeny_benchmark_input, "output/general_robustness/progeny_benchmark_input.rds")
+progeny_benchmark_input = readRDS("output/general_robustness/progeny_benchmark_input.rds")
+
+# benchmark the global performance (across all pathways)
+# roc analysis
+progeny_performance_roc = progeny_benchmark_input %>%
+  group_by(organism, dropin, footprints, run) %>%
+  roc_auc(response, predictor, options = list(direction = "<", transpose = F)) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) 
+
+# pr analysis
+progeny_performance_pr = progeny_benchmark_input %>%
+  group_by(organism, dropin, footprints, run) %>%
+  pr_auc(response, predictor) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator)
+
+# save benchmark result
+progeny_performance = bind_rows(progeny_performance_roc, progeny_performance_pr) %>%
+  mutate(dropin = factor(dropin, levels = c("all", "8000", "7000", "5000", 
+                                            "3000", "2000", "1000", "500")))
+
+saveRDS(progeny_performance, "output/general_robustness/progeny_performance.rds")
 ```
+
+#### Benchmarking PROGENy pathway-wise
+```{r "downsampled-progeny benchmark"}
+# This script is based on the prepared PROGENy scores for benchmarking
+progeny_benchmark_input = readRDS("output/general_robustness/progeny_benchmark_input.rds")
+
+# benchmarking the performance of each individual pathway
+# roc analysis
+progeny_performance_pw_roc = progeny_benchmark_input %>%
+  group_by(organism, dropin, footprints, pathway, run) %>%
+  roc_auc(response, predictor, options = list(direction = "<", transpose = F)) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) 
+
+# pr analysis
+progeny_performance_pw_pr = progeny_benchmark_input %>%
+  group_by(organism, dropin, footprints, pathway, run) %>%
+  pr_auc(response, predictor) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator)
+
+# save pathway-wise benchmark result
+progeny_performance_pw = bind_rows(progeny_performance_pw_roc, progeny_performance_pw_pr) %>%
+  mutate(dropin = factor(dropin, levels = c("all", "8000", "7000", "5000", 
+                                            "3000", "2000", "1000", "500")))
+
+saveRDS(progeny_performance_pw, "output/general_robustness/progeny_performance_pw.rds")
+```
+
 
 #### DoRothEA
 ```{r "downsampled-dorothea benchmark"}
+# load benchmark data containing contrasts of single TF perturbation experiments
 expr = readRDS("data/general_robustness/dorothea_benchmark_data.rds") %>%
   select(-c(z, logFC)) %>%
   rename(expression = t) %>%
   filter(organism == "human") %>%
   nest(-organism, .key="df")
 
+# load DoRothEA regulons with confidence level A abd B
 human_regulon = read_csv("data/regulons/dorothea/dorothea_regulon_human_v1.csv")
   filter(confidence %in% c("A", "B"))
 
+# summarize the regulons in a tibble
 R = tribble(
   ~organism, ~regulon, ~missing_value, ~qc, ~qc_th,
   "human",  human_regulon, 0, F, 0
 )
 
-# design experiments
+# definition of technical replicates and different gene coverage values (dropin)
 reps = 25
 dropins = c("500", "1000", "2000","3000","5000", "7000", "8000", "all")
-#dropins = c("1000")
 
+# subset benchmark data to the corresponding gene coverage
 set.seed(123)
 design = tibble(dropin = dropins) %>%
   mutate(organism = "human") %>%
@@ -183,6 +266,7 @@ dorothea_performance_global = design %>%
          pr = activity %>% map(calc_pr_curve),
          roc_obj = activity %>% map(get_roc_object))
 
+# save dorothea performance result
 dorothea_performance_global = dorothea_performance_global %>%
   mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
                                           2000, 1000, 500)))
@@ -192,6 +276,7 @@ saveRDS(dorothea_performance_global, "output/general_robustness/dorothea_perform
 
 #### GSEA with GO-terms
 ```{r}
+# load benchmark datadata containing contrasts of single pathway perturbations experiments
 expr = readRDS("data/general_robustness/progeny_benchmark_data.rds") %>%
   filter(organism == "human") %>%
   nest(-organism, .key="df")
@@ -217,7 +302,7 @@ progeny_go_mapping = tribble(
 
 saveRDS(progeny_go_mapping, "output/general_robustness/progeny_go_mapping.rds")
 
-# transformation of progeny matrix to gene sets
+# transformation of progeny matrix to the gene set format required for GSEA
 go_genesets = msigdf.human %>%
   inner_join(progeny_go_mapping) %>%
   select(pathway = progeny, gene = symbol) %>%
@@ -225,24 +310,27 @@ go_genesets = msigdf.human %>%
   summarise(geneset = list(gene)) %>%
   deframe()
 
+# summarize gene sets into a tibble
 G = tribble(
   ~organism, ~geneset, ~missing_value, ~qc, ~qc_th,
   "human",  go_genesets, 0, F, 0
 )
 
-# design experiments
+# definition of technical replicates and different gene coverage values (dropin)
 reps = 25
 dropins = c("500", "1000", "2000","3000","5000", "7000", "8000", "all")
 
+# subset benchmark data to the corresponding gene coverage
+set.seed(123)
 design = tibble(dropin = dropins) %>%
   mutate(organism = "human") %>%
   inner_join(expr, by="organism") %>%
   mutate(reps = reps) %>%
-  mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
+  dplyr::mutate(df = pmap(., .f=induce_low_gene_coverage)) %>%
   unnest(df) %>%
   inner_join(G, by="organism") 
 
-
+# Functiont to perform GSEA analysis
 run_gsea = function(df, geneset, ...) {
   meta_df = df %>%
     select(one_of("id", "accession", "pathway", "platform", "info", "treatment",
@@ -259,7 +347,7 @@ run_gsea = function(df, geneset, ...) {
   
   
   res = apply(expr, 2, function(col) {
-      fgsea(pathways = genesets,
+      fgsea(pathways = geneset,
             stats = col,
             nperm = 1000) %>%
         as_tibble() %>%
@@ -276,21 +364,90 @@ run_gsea = function(df, geneset, ...) {
     inner_join(., meta_df, by="id")
 }
 
-  
-
-# run gsea and measure performance globally
-gogsea_performance_global = design %>%
+# run GSEA with PROGENy gene sets
+gogsea_scores = design %>%
   mutate(activity = future_pmap(., .f = run_gsea, .progress = T)) %>%
-  select(-c(df, geneset, missing_value)) %>%
-  mutate(activity = activity %>% map(prepare_progeny_for_roc, 
-                                     filter_tn = T)) %>%
-  mutate(roc = activity %>% map(calc_roc_curve),
-         pr = activity %>% map(calc_pr_curve),
-         roc_obj = activity %>% map(get_roc_object))
+  select(-c(df, geneset, missing_value))
 
-gogsea_performance_global = gogsea_performance_global %>%
-  mutate(dropin = factor(dropin, levels=c("all", 8000, 7000, 5000, 3000, 
-                                          2000, 1000, 500)))
+# save intermediate result
+saveRDS(gogsea_scores, "output/general_robustness/gogsea_scores.rds")
+gogsea_scores = readRDS("output/general_robustness/gogsea_scores.rds")
 
-saveRDS(gogsea_performance_global, "output/general_robustness/gogsea_performance.rds")
+# prepare GSEA output for benchmark
+gogsea_benchmark_input = gogsea_scores %>%
+  mutate(benchmark_input = activity %>% map(function(activity) {
+    # extract only pathway that were targeted AND also predicted
+    z = activity %>% 
+      filter(progeny_pathway == pathway) %>%
+      distinct(pathway) %>%
+      pull()
+    
+    activity %>%
+      filter(progeny_pathway %in% z & pathway %in% z) %>%
+      mutate(response = case_when(progeny_pathway == pathway ~ 1,
+                                  progeny_pathway != pathway ~ 0),
+             response = factor(response, levels = c("1", "0")),
+             predictor = score * sign) %>%
+      select(response, predictor, run, pathway = progeny_pathway)
+  })) %>%
+  unnest(benchmark_input)
+
+saveRDS(gogsea_benchmark_input, "output/general_robustness/gogsea_benchmark_input.rds")
+
+# benchmark the global performance (across all pathways)
+# roc analysis
+gogsea_benchmark_input = readRDS("output/general_robustness/gogsea_benchmark_input.rds")
+gogsea_performance_roc = gogsea_benchmark_input %>%
+  group_by(organism, dropin, run) %>%
+  roc_auc(response, predictor, options = list(direction = "<", transpose = F)) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) 
+
+# pr analysis
+gogsea_performance_pr = gogsea_benchmark_input %>%
+  group_by(organism, dropin, run) %>%
+  pr_auc(response, predictor) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator)
+
+# save global benchmark result
+gogsea_performance = bind_rows(gogsea_performance_roc, gogsea_performance_pr) %>%
+  mutate(dropin = factor(dropin, levels = c("all", "8000", "7000", "5000", 
+                                            "3000", "2000", "1000", "500")))
+
+saveRDS(gogsea_performance, "output/general_robustness/gogsea_performance.rds")
 ```
+
+#### Benchmarking GSEA with GO-terms pathway-wise
+```{r}
+# This script is based on the prepared GSEA scores for benchmarking
+gogsea_benchmark_input = readRDS("output/general_robustness/gogsea_benchmark_input.rds")
+
+# benchmarking the performance of each individual pathway
+# roc analysis
+gogsea_performance_pw_roc = gogsea_benchmark_input %>%
+  group_by(organism, dropin, pathway, run) %>%
+  roc_auc(response, predictor, options = list(direction = "<", transpose = F)) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator) 
+
+# pr analysis
+gogsea_performance_pw_pr = gogsea_benchmark_input %>%
+  group_by(organism, dropin, pathway, run) %>%
+  pr_auc(response, predictor) %>%
+  ungroup() %>%
+  rename(metric = .metric, auc = .estimate) %>%
+  select(-.estimator)
+
+# save pathway-wise benchmark result
+gogsea_performance_pw = bind_rows(gogsea_performance_pw_roc, gogsea_performance_pw_pr) %>%
+  mutate(dropin = factor(dropin, levels = c("all", "8000", "7000", "5000", 
+                                            "3000", "2000", "1000", "500")))
+
+saveRDS(gogsea_performance_pw, "output/general_robustness/gogsea_performance_pw.rds")
+
+```
+
