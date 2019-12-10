@@ -420,7 +420,7 @@ gogsea_performance = bind_rows(gogsea_performance_roc, gogsea_performance_pr) %>
 saveRDS(gogsea_performance, "output/general_robustness/gogsea_performance.rds")
 ```
 
-#### GSEA with GO-terms pathway-wise
+#### Benchmarking GSEA with GO-terms pathway-wise
 ```{r}
 # This script is based on the prepared GSEA scores for benchmarking
 gogsea_benchmark_input = readRDS("output/general_robustness/gogsea_benchmark_input.rds")

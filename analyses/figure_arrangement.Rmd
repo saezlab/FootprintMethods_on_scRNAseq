@@ -57,7 +57,7 @@ ggsave("paper/figures/main_general_robustness.png",
        general_robustness_main,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig1_general_robustness.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Figure1.png",
        general_robustness_main,
        width=10, height=5)
 ```
@@ -78,17 +78,17 @@ g_auroc_vs_auprc = readRDS(str_c(gogsea_path, "auroc_vs_auprc.rds"))
 mapping_table = readRDS("fig/general_robustness/gogsea/progeny_go_mapping.rds")
 
 top = plot_grid(workflow, labels=c("a"), label_size = 18)
-mid = plot_grid(mapping_table, labels = c("b"), label_size = 18)
-bottom = plot_grid(
-  d_auroc_vs_auprc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("c", "d", "e"), label_size = 18, ncol=3
+bottom = plot_grid(mapping_table, labels = c("d"), label_size = 18)
+mid = plot_grid(
+  d_auroc_vs_auprc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("b", "c", "e"), label_size = 18, ncol=3
 )
 general_robustness_supp1 = plot_grid(top, mid, bottom, ncol=1)
 
-ggsave("paper/figures/supp_general_robustness1.png", 
+ggsave("paper/figures/supp_general_robustness_1.png", 
        general_robustness_supp1,
        width = 12, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS1_general_robustness.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure1.png",
        general_robustness_supp1,
        width=12, height=12)
 ```
@@ -107,15 +107,23 @@ p_auroc_vs_auprc = readRDS(str_c(progeny_path, "pw_auroc_vs_auprc.rds"))
 g_auroc_vs_auprc = readRDS(str_c(gogsea_path, "auroc_vs_auprc_pw.rds"))
 
 
-general_robustness_supp2 = plot_grid(p_gene_coverage_vs_auroc, g_gene_coverage_vs_auroc, p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("A", "C", "B", "D"), label_size = 18, align = "hv", axis = "lt")
+# general_robustness_supp2 = plot_grid(
+#   p_gene_coverage_vs_auroc, g_gene_coverage_vs_auroc, 
+#   p_auroc_vs_auprc, g_auroc_vs_auprc, labels = c("a", "c", "b", "d"), 
+#   label_size = 18, align = "hv", axis = "lt")
 
-ggsave("paper/figures/supp_general_robustness2.png", 
+general_robustness_supp2 = plot_grid(
+  p_gene_coverage_vs_auroc, g_gene_coverage_vs_auroc, 
+  labels = c("a", "b"), ncol=1, 
+  label_size = 18, align = "hv", axis = "lt")
+
+ggsave("paper/figures/supp_general_robustness_2.pdf", 
        general_robustness_supp2,
-       width = 25, height = 18)
+       width = 15, height = 20)
 
-# ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS1_general_robustness.png",
-#        general_robustness_supp1,
-#        width=12, height=12)
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure2.png",
+       general_robustness_supp2,
+       width=15, height=20)
 ```
 
 
@@ -171,7 +179,8 @@ in_silico_benchmark_main = plot_grid(
 ggsave("paper/figures/main_in_silico_benchmark.png", 
        in_silico_benchmark_main,
        width = 15, height = 15)
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig2_in_silico_benchmark.png",
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Figure2.png",
        in_silico_benchmark_main,
        width=15, height=15)
 ```
@@ -195,13 +204,15 @@ in_silico_benchmark_supp_1 = plot_grid(
   labels = c("a", "b"), label_size = 18, align = "h", axis="tb"
   )
 
-ggsave("paper/figures/supp_in_silico_benchmark_1.png", 
+ggsave("paper/figures/supp_in_silico_benchmark_1.pdf", 
        in_silico_benchmark_supp_1,
        width = 10, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS2_in_silico_benchmark_1.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure3.png",
        in_silico_benchmark_supp_1,
        width=10, height=5)
+
+
 ```
 
 
@@ -223,7 +234,7 @@ in_silico_benchmark_supp_2 = plot_grid(
   s_m_vs_v,
   l_real, 
   l_sim,
-  align = "vh", axis = "lrbt", labels = c("a", "b", "c", "d", "e", "f"), 
+  align = "vh", axis = "lrbt", labels = c("a", "", "b", "", "c", ""), 
   label_size = 18, ncol=2
 )
 
@@ -231,7 +242,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_2.png",
        in_silico_benchmark_supp_2,
        width = 10, height = 15)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS3_in_silico_benchmark_2.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure4.png",
        in_silico_benchmark_supp_2,
        width=10, height=15)
 ```
@@ -265,7 +276,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_3.png",
        in_silico_benchmark_supp_3,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS4_in_silico_benchmark_3.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure5.png",
        in_silico_benchmark_supp_3,
        width=15, height=10)
 ```
@@ -297,7 +308,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_4.png",
        in_silico_benchmark_supp_4,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS5_in_silico_benchmark_4.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure6.png",
        in_silico_benchmark_supp_4,
        width=15, height=10)
 ```
@@ -330,7 +341,7 @@ ggsave("paper/figures/supp_in_silico_benchmark_5.png",
        in_silico_benchmark_supp_5,
        width = 15, height = 10)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS6_in_silico_benchmark_5.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure7.png",
        in_silico_benchmark_supp_5,
        width=15, height=10)
 ```
@@ -340,209 +351,301 @@ ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS6_in_sil
 ```{r "in vitro benchmark"}
 path = "fig/in_vitro_benchmark/"
 
-roc_vs_cov_ind = readRDS(str_c(path, "roc_vs_cov_ind.rds"))
-roc_vs_pr_ind = readRDS(str_c(path, "roc_vs_pr_ind.rds")) + theme(legend.position = "none")
-# roc_vs_cov_sub = readRDS(str_c(path, "roc_vs_cov_sub.rds")) + theme(legend.position = "none")
-# roc_vs_pr_sub = readRDS(str_c(path, "roc_vs_pr_sub.rds")) + theme(legend.position = "none")
+roc_vs_cov_ind = readRDS(str_c(path, "roc_vs_cov_ind.rds")) +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        strip.text.x = element_blank()) + 
+  labs(y = "TF coverage")
+roc_vs_cov_ind_sub = readRDS(str_c(path, "roc_vs_cov_ind_sub.rds")) + 
+  labs(y="TF coverage", x=NULL)  
+
 
 in_vitro_benchmark_main = plot_grid(
-  roc_vs_cov_ind,
-  ncol = 1, label_size = 18,
-  align = "h", axis="l"
+  roc_vs_cov_ind_sub, roc_vs_cov_ind, 
+  ncol = 1, label_size = 18, labels = c("a", "b"),
+  align = "v", axis="lr", rel_heights = c(0.5,1)
   )
 ggsave("paper/figures/main_in_vitro_benchmark.png", 
-       in_vitro_benchmark_main , width = 10, height=5)
+       in_vitro_benchmark_main , width = 10, height=6.5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig3_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Figure3.png",
        in_vitro_benchmark_main,
-       width=10, height=5)
+       width=10, height=6.5)
 ```
-#### Supp
+#### Supp 1
 ```{r}
 path = "fig/in_vitro_benchmark/"
 h = readRDS(str_c(path, "histogram_of_logfc.rds"))
 l = readRDS(str_c(path, "libsize_num_cells.rds"))
 q = readRDS(str_c(path, "quality_check.rds"))
 b = readRDS(str_c(path, "benchmark_data.rds")) + 
-  theme(legend.title = element_text())
-  labs(fill = "Confidence score")
-
-# viper_roc_curves = readRDS(str_c(path, "viper_roc_curves.rds"))
-# metaviper_roc_curves = readRDS(str_c(path, "metaviper_roc_curves.rds")) +
-#   theme(legend.position = "none")
-# aucell_roc_curves = readRDS(str_c(path, "aucell_roc_curves.rds")) +
-#   theme(legend.position = "none")
-# viper_pr_curves = readRDS(str_c(path, "viper_pr_curves.rds"))
-# metaviper_pr_curves = readRDS(str_c(path, "metaviper_pr_curves.rds")) +
-#   theme(legend.position = "none")
-# aucell_pr_curves = readRDS(str_c(path, "aucell_pr_curves.rds")) +
-#   theme(legend.position = "none")
+  theme(legend.title = element_text()) +
+  labs(fill = "Confidence level")
 
 roc_vs_pr_ind = readRDS(str_c(path, "roc_vs_pr_ind.rds")) + 
   theme(legend.position = "top")
 
+col1 = align_plots(b, q, roc_vs_pr_ind, align = "v", axis = "l")
+
+
+
 top = plot_grid(
-  b, l,
-  ncol=2, labels = c("a", "b"), label_size = 18, align="hv", axis="btlr"
+  col1[[1]], l,
+  ncol=2, labels = c("a", "b"), label_size = 18, align="h", axis="bt"
 )
 
 middle = plot_grid(
-  q, h,
-  ncol=2, labels = c("c", "d"), label_size = 18, align="hv", axis="btlr",
+  col1[[2]], h,
+  ncol=2, labels = c("c", "d"), label_size = 18, align="h", axis="bt",
   rel_widths = c(1,1.4)
 )
 
-# bottom = plot_grid(
-#   viper_roc_curves, aucell_roc_curves, metaviper_roc_curves,
-#   viper_pr_curves, aucell_pr_curves, metaviper_pr_curves,
-#   ncol=3, labels=c("e", "f", "g", "h", "i", "j"), label_size = 18, align="vh", axis="lbt"
-# )
 bottom = plot_grid(
-  roc_vs_pr_ind, labels = c("e"), label_size = 18
+  col1[[3]], labels = c("e"), label_size = 18
 )
 
 in_vitro_benchmark_supp = plot_grid(top, middle, bottom, ncol=1, align="v", axis="l", rel_heights = c(1,1,1))
 
-ggsave("paper/figures/supp_in_vitro_benchmark.png", 
+ggsave("paper/figures/supp_in_vitro_benchmark_1.png", 
        in_vitro_benchmark_supp , width = 14, height=14)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS7_in_vitro_benchmark.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure8.png",
        in_vitro_benchmark_supp,
        width=14, height=14)
 ```
 
 ### Clustering analysis
-#### Main
+#### Main1
 ```{r "clustering analysis"}
 path = "fig/clustering_analysis/"
 
-dend = readRDS(str_c(path, "dendogram.rds"))
-tf_cor = readRDS(str_c(path, "tf_cor_plot.rds")) + guides(color = guide_legend(ncol=3)) 
-pw_cor = readRDS(str_c(path, "pathway_cor_plot.rds")) + guides(color = guide_legend(ncol=3)) 
-
-activity_vs_expression = readRDS(str_c(path, "activity_greater_expression.rds")) + guides(color = guide_legend(nrow=1)) 
-
-progeny_hmap = readRDS(str_c(path, "progeny_hmap.rds"))
-pauc_hmap = readRDS(str_c(path, "paucell_hmap.rds"))
-dauc_hmap = readRDS(str_c(path, "daucell_hmap.rds"))
+dend = readRDS(str_c(path, "dendogram.rds")) +
+  theme(axis.text.x = element_text(angle = 0, size=10),
+        plot.margin = unit(c(0.5,3.5,1,3.5), "cm"))
+tf_boxplot = readRDS(str_c(path, "tf_boxplot.rds")) +
+  theme(plot.margin = unit(c(0,2,0.5,0), "cm"))
+pw_boxplot = readRDS(str_c(path, "pathway_boxplot.rds")) +
+  theme(plot.margin = unit(c(0.5,2,0,0), "cm"))
 viper_hmap = readRDS(str_c(path, "viper_hmap.rds"))
+activity_vs_expression = readRDS(str_c(path, "activity_greater_expression.rds")) + guides(color = guide_legend(nrow=1)) +
+  theme(plot.margin = unit(c(0.5,2,0,0), "cm"))
 
-first_row = plot_grid(
-  dend, tf_cor,
-  ncol=2, labels=c("a", "b"), label_size = 18
-)
+top = plot_grid(dend, labels = c("a"), label_size = 18)
 
-second_row = plot_grid(
-  activity_vs_expression, pw_cor, 
-  ncol=2, labels=c("c", "d"), label_size = 18, align = "h", axis = "t"
-)
-third_row = plot_grid(
-  progeny_hmap, pauc_hmap, labels = c("e","f"), label_size = 18, rel_widths = c(1.13,1)
-)
+left = plot_grid(tf_boxplot, activity_vs_expression, pw_boxplot, ncol = 1, 
+                 labels = c("b", "c", "d"), 
+                 align = "v", axis = "l",
+                 label_size = 18)
+right = plot_grid(viper_hmap, labels = c("e"), label_size = 18)
 
-fourth_row = plot_grid(
-  viper_hmap, dauc_hmap,
-  labels = c("g", "h"), label_size = 18, rel_widths = c(1.13,1)
-)
+bottom = plot_grid(left, right, ncol=2, rel_widths = c(1,0.8))
 
-clustering_analysis_main = plot_grid(first_row, second_row, third_row, fourth_row, ncol=1, rel_heights = c(1.1,1.0,1.2,2))
+clustering_analysis_main = plot_grid(top, bottom, ncol=1, rel_heights = c(0.25,1))
 
 ggsave("paper/figures/main_clustering_analysis.png", 
        clustering_analysis_main,
-       width = 14, height = 18)
+       width = 15, height = 15)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Fig4_clustering_analysis.png",
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/Figure4.png",
        clustering_analysis_main,
-       width=14, height=18)
+       width=15, height=15)
 
 ```
+
+
 #### Supp1
-```{r "clustering analysis"}
+```{r}
 path = "fig/clustering_analysis/"
 
-expr_cor_all_hrchy = readRDS(str_c(path, "expr_cor_plot_all_hrchy.rds"))
+pdf(str_c(path, "common_regulons.pdf"), width=15, height=12)
+readRDS(str_c(path, "common_regulons.rds"))
+dev.off()
 
-clustering_analysis_supp_1 = plot_grid(
-  expr_cor_all_hrchy,
-  ncol = 1
-  )
+pdf(str_c(path, "common_scenic_regulons.pdf"), width=15, height = 12)
+readRDS(str_c(path, "common_scenic_regulons.rds"))
+dev.off()
 
-ggsave("paper/figures/supp_clustering_analysis_1.png", 
-       clustering_analysis_supp_1,
-       width = 10, height = 5)
+common_regulons = ggdraw() +
+  draw_image(str_c(path, "common_regulons.pdf"))
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS8_clustering_analysis.png",
-       clustering_analysis_supp_1,
-       width=10, height=5)
+common_scenic_regulons = ggdraw() +
+  draw_image(str_c(path, "common_scenic_regulons.pdf"))
 
+unlink(str_c(path, "common_regulons.pdf"))
+unlink(str_c(path, "common_scenic_regulons.pdf"))
+
+y = plot_grid(common_scenic_regulons, common_regulons, labels = c("a", "b"), label_size = 18, ncol=1)
+
+ggsave("paper/figures/supp_clustering_analysis_1.png",
+       y,
+       height = 15, width = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure9.png",
+       y,
+       width=10, height=15)
 ```
 
 #### Supp2
+```{r}
+tf_cor = readRDS(str_c(path, "tf_cor.rds"))
+
+ggsave("paper/figures/supp_clustering_analysis_2.png",
+       tf_cor,
+       height = 5, width = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure10.png",
+       tf_cor,
+       width=10, height=5)
+```
+
+
+#### Supp3
 ```{r "clustering analysis"}
 path = "fig/clustering_analysis/"
 
-tf_cor_all_hrchy = readRDS(str_c(path, "tf_cor_plot_all_hrchy.rds")) +
-  scale_x_continuous(breaks = c(-0.25,0,0.25,0.5)) +
-  theme(axis.text = element_text(size=12))
-
-tf = readRDS(str_c(path, "tf_stats_plot.rds")) + theme(legend.position = "top",
-                                                       legend.key.width = unit(2, "cm"))
-
-
-clustering_analysis_supp_2 = plot_grid(
-  tf,
-  tf_cor_all_hrchy,
-  ncol = 1, labels = c("a","b"), label_size = 18, align = "v", axis="lr"
-  )
-
-ggsave("paper/figures/supp_clustering_analysis_2.png", 
-       clustering_analysis_supp_2,
-       width = 10, height = 12)
-
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS9_clustering_analysis.png",
-       clustering_analysis_supp_2,
-       width=10, height=12)
-
-```
-#### Supp3
-```{r}
-path = "fig/clustering_analysis/"
-pw = readRDS(str_c(path, "pw_stats_plot.rds")) + theme(legend.position = "top",
-                                                       legend.key.width = unit(2, "cm"))
-pw_cor_all_hrchy = readRDS(str_c(path, "pathway_cor_plot_all_hrchy.rds")) +
-  scale_x_continuous(breaks = c(-0.25,0,0.25,0.5)) +
-  theme(axis.text = element_text(size=12))
+gex_boxplot_all_hrchy = readRDS(str_c(path, "gex_boxplot_all_hrchy.rds")) +
+  scale_y_continuous(breaks = c(-0.25,0,0.25,0.5))
 
 clustering_analysis_supp_3 = plot_grid(
-  pw, 
-  pw_cor_all_hrchy,
-  labels = c("a", "b"), label_size = 18, ncol = 1, align = "v",
-  axis ="lr"
+  gex_boxplot_all_hrchy,
+  ncol = 1
   )
 
 ggsave("paper/figures/supp_clustering_analysis_3.png", 
        clustering_analysis_supp_3,
-       width = 10, height = 12)
+       width = 15, height = 5)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS10_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure11.png",
        clustering_analysis_supp_3,
-       width=10, height=12)
+       width=10, height=5)
+
 ```
 
 #### Supp4
 ```{r "clustering analysis"}
 path = "fig/clustering_analysis/"
 
-mv_hmap = readRDS(str_c(path, "metaviper_hmap.rds"))
+tf_boxplot_all_hrchy = readRDS(str_c(path, "tf_boxplot_all_hrchy.rds")) +
+  scale_y_continuous(breaks = c(-0.25,0,0.25,0.5)) +
+  theme(axis.text = element_text(size=12))
 
-clustering_analysis_supp_4 = plot_grid(mv_hmap)
+tf = readRDS(str_c(path, "tf_stats_plot.rds")) + theme(legend.position = "top",
+                                                       legend.key.width = unit(2, "cm"))
+
+
+clustering_analysis_supp_4 = plot_grid(
+  tf,
+  tf_boxplot_all_hrchy,
+  ncol = 1, labels = c("a","b"), label_size = 18, align = "v", axis="lr"
+  )
 
 ggsave("paper/figures/supp_clustering_analysis_4.png", 
        clustering_analysis_supp_4,
-       width = 10, height = 15)
+       width = 12, height = 12)
 
-ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/FigS11_clustering_analysis.png",
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure12.png",
        clustering_analysis_supp_4,
-       width=10, height=15)
+       width=12, height=12)
 
+```
+
+
+<!-- #### Supp5 -->
+<!-- ```{r} -->
+<!-- path = "fig/clustering_analysis/" -->
+<!-- tf_lp = readRDS(str_c(path, "protocol_ranking_tf_all_hrchy.rds")) + theme(legend.position = "none") -->
+<!-- pw_lp = readRDS(str_c(path, "protocol_ranking_pw_all_hrchy.rds")) + theme(legend.position = "none") -->
+<!-- legend = get_legend( -->
+<!--   readRDS(str_c(path, "protocol_ranking_tf_all_hrchy.rds")) + theme(legend.position = "top") -->
+<!--   ) -->
+
+<!-- x = plot_grid(legend, tf_lp, pw_lp, ncol = 1, labels = c("","a", "b"), label_size = 18, align = "v", axis = "l", rel_heights = c(0.2,1,1)) -->
+
+<!-- ggsave("paper/figures/supp_clustering_analysis_5.png",  -->
+<!--        x, -->
+<!--        width = 12, height = 12) -->
+
+<!-- ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure13.png", -->
+<!--        x, -->
+<!--        width=12, height=12) -->
+
+<!-- ``` -->
+
+
+#### Supp5
+```{r}
+path = "fig/clustering_analysis/"
+pw = readRDS(str_c(path, "pw_stats_plot.rds")) + theme(legend.position = "top",
+                                                       legend.key.width = unit(2, "cm"))
+pw_boxplot_all_hrchy = readRDS(str_c(path, "pathway_boxplot_all_hrchy.rds")) +
+  scale_y_continuous(breaks = c(-0.25,0,0.25,0.5)) +
+  theme(axis.text = element_text(size=12))
+
+clustering_analysis_supp_5 = plot_grid(
+  pw, 
+  pw_boxplot_all_hrchy,
+  labels = c("a", "b"), label_size = 18, ncol = 1, align = "v",
+  axis ="lr"
+  )
+
+ggsave("paper/figures/supp_clustering_analysis_5.png", 
+       clustering_analysis_supp_5,
+       width = 12, height = 12)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure13.png",
+       clustering_analysis_supp_5,
+       width=10, height=12)
+```
+
+#### Supp6
+```{r "clustering analysis"}
+path = "fig/clustering_analysis/"
+
+scenic_hmap = readRDS(str_c(path, "scenic_hmap.rds"))
+dauc_hmap = readRDS(str_c(path, "daucell_hmap.rds"))
+mv_hmap = readRDS(str_c(path, "metaviper_hmap.rds"))
+progeny_hmap = readRDS(str_c(path, "progeny_hmap.rds"))
+pauc_hmap = readRDS(str_c(path, "paucell_hmap.rds"))
+
+
+
+clustering_analysis_supp_6 = plot_grid(
+  dauc_hmap, mv_hmap, scenic_hmap,
+  progeny_hmap, pauc_hmap, rel_heights = c(1,0.6), labels = "auto", label_size = 18,
+  ncol=3)
+
+ggsave("paper/figures/supp_clustering_analysis_6.png", 
+       clustering_analysis_supp_6,
+       width = 15, height = 15)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure14.png",
+       clustering_analysis_supp_6,
+       width=15, height=15)
+
+```
+
+#### Supp7
+```{r}
+path = "fig/clustering_analysis/"
+tf_vs_ess = readRDS(str_c(path, "activity_essentiality_cor.rds"))
+a_plot = readRDS(str_c(path, "activity_boxplot.rds"))
+e_plot = readRDS(str_c(path, "essentiality_boxplot.rds"))
+
+ae_plot = plot_grid(a_plot, e_plot, labels = c("a", "b"), label_size = 18)
+
+y = plot_grid(
+  ae_plot,
+  tf_vs_ess,
+  ncol=1, labels = c("", "c"), label_size = 18
+)
+
+
+ggsave("paper/figures/supp_clustering_analysis_7.png",
+       y,
+       height = 10, width = 10)
+
+ggsave("~/Google Drive/Paper/scRNA_benchmark/RevisionGenBio/Figures/SFigure15.png",
+       y,
+       width=10, height=10)
 ```
