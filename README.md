@@ -18,6 +18,7 @@ Our analyses suggest that bulk-based functional analysis tools that use manually
 
 ### Availabilty of data
 The datasets supporting the conclusions of this publication are available at Zenodo:
+
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.3564179.svg)](https://doi.org/10.5281/zenodo.3564179)
 
 From Zenodo you can download these (zipped) folders: 
